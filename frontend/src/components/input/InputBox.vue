@@ -1052,7 +1052,8 @@ defineExpose({
   border: 1px solid var(--vscode-input-border);
   border-radius: var(--radius-sm, 2px);
   font-family: var(--vscode-font-family);
-  font-size: 13px;
+  /* 输入框文字跟随用户消息字号设置（默认 13px，不改变 UI 其它部分） */
+  font-size: var(--gc-msg-user-font-size, 13px);
   line-height: 1.5;
   transition: border-color var(--transition-fast, 0.1s);
   outline: none;

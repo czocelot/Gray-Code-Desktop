@@ -336,6 +336,22 @@ export interface GlobalSettings {
              * 默认 100。
              */
             uiOpacity?: number;
+
+            /**
+             * 用户消息字号（像素）
+             *
+             * 仅作用于聊天区用户输入消息的显示字号与输入框文字，不改变 UI 其它部分的字号。
+             * 默认 13。
+             */
+            userMessageFontSize?: number;
+
+            /**
+             * AI 消息字号（像素）
+             *
+             * 仅作用于聊天区 AI 发送消息（含思考块与流式尾巴）的显示字号，不改变 UI 其它部分的字号。
+             * 默认 13。
+             */
+            assistantMessageFontSize?: number;
         };
 
         /**
@@ -473,7 +489,10 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
             splashEnabled: true,
             wallpaperPath: '',
             wallpaperOpacity: 30,
-            uiOpacity: 100
+            uiOpacity: 100,
+            // 聊天消息字号（像素，默认 13，与 UI 基准字号一致）
+            userMessageFontSize: 13,
+            assistantMessageFontSize: 13
         },
         sound: {
             enabled: false,

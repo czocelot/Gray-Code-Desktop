@@ -1108,6 +1108,13 @@ function handleRestoreAndRetry(checkpointId: string) {
 /* 用户消息淡蓝色背景 — 滚动时快速定位 */
 .user-message {
   background-color: color-mix(in srgb, var(--vscode-textLink-foreground) 6%, transparent);
+  /* 用户消息正文字号跟随设置（不改变 UI 其它部分） */
+  --lim-md-font-size: var(--gc-msg-user-font-size, 13px);
+}
+
+/* AI 消息正文字号跟随设置（含流式尾巴；不改变 UI 其它部分） */
+.assistant-message {
+  --lim-md-font-size: var(--gc-msg-assistant-font-size, 13px);
 }
 
 /* 消息头部 */
@@ -1608,3 +1615,4 @@ function handleRestoreAndRetry(checkpointId: string) {
 }
 
 </style>
+

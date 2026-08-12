@@ -46,6 +46,10 @@ const themeMode = ref<ThemeMode>('auto')
 // 桌面端 UI 不透明度（0-100，默认 100；输入框/设置面板等界面面板）
 const uiOpacity = ref(100)
 
+// 聊天消息字号（像素，默认 13；仅作用于用户输入消息与 AI 消息，不改变 UI 其它部分字号）
+const userMessageFontSize = ref(13)
+const assistantMessageFontSize = ref(13)
+
 const defaultLoadingText = computed(() => t('common.loading'))
 
 function resolveSelectionContextEnabled(appearance: any): boolean {
@@ -82,6 +86,8 @@ async function loadConfig() {
     wallpaperOpacity.value = typeof appearance?.wallpaperOpacity === 'number' ? appearance.wallpaperOpacity : 30
     themeMode.value = isThemeMode(response?.settings?.ui?.theme) ? response.settings.ui.theme : 'auto'
     uiOpacity.value = typeof appearance?.uiOpacity === 'number' ? appearance.uiOpacity : 100
+    userMessageFontSize.value = typeof appearance?.userMessageFontSize === 'number' ? appearance.userMessageFontSize : 13
+    assistantMessageFontSize.value = typeof appearance?.assistantMessageFontSize === 'number' ? appearance.assistantMessageFontSize : 13
     settingsStore.setAppearanceLoadingText(saved)
     settingsStore.setSelectionContextEnabled(savedSelectionContextEnabled)
     settingsStore.setSmoothStreaming(savedSmoothStreaming)
@@ -91,6 +97,8 @@ async function loadConfig() {
     settingsStore.setWallpaperOpacity(wallpaperOpacity.value)
     settingsStore.setTheme(themeMode.value)
     settingsStore.setUiOpacity(uiOpacity.value)
+    settingsStore.setUserMessageFontSize(userMessageFontSize.value)
+    settingsStore.setAssistantMessageFontSize(assistantMessageFontSize.value)
 
     // 已配置背景图：重新读取内容用于预览（同时校验文件是否仍存在；失败静默回退为空预览）
     wallpaperPreview.value = ''
@@ -134,7 +142,9 @@ async function saveConfig() {
           splashEnabled: splashEnabled.value,
           wallpaperPath: wallpaperPath.value,
           wallpaperOpacity: wallpaperOpacity.value,
-          uiOpacity: uiOpacity.value
+          uiOpacity: uiOpacity.value,
+          userMessageFontSize: userMessageFontSize.value,
+          assistantMessageFontSize: assistantMessageFontSize.value
         }
       }
     })
@@ -147,6 +157,8 @@ async function saveConfig() {
     settingsStore.setSplashEnabled(splashEnabled.value)
     settingsStore.setTheme(themeMode.value)
     settingsStore.setUiOpacity(uiOpacity.value)
+    settingsStore.setUserMessageFontSize(userMessageFontSize.value)
+    settingsStore.setAssistantMessageFontSize(assistantMessageFontSize.value)
     applyWallpaperToStore()
 
     saveMessage.value = t('components.settings.appearanceSettings.saveSuccess')
@@ -175,6 +187,8 @@ async function resetToDefault() {
   wallpaperOpacity.value = 30
   themeMode.value = 'auto'
   uiOpacity.value = 100
+  userMessageFontSize.value = 13
+  assistantMessageFontSize.value = 13
   applyWallpaperToStore()
   await saveConfig()
 }
@@ -416,6 +430,52 @@ onMounted(() => {
           />
         </div>
         <p class="field-hint">{{ t('components.settings.appearanceSettings.uiOpacity.hint') }}</p>
+      </div>
+
+      <div class="form-group" data-search-anchor="user-message-font-size">
+        <label class="group-label">
+          <i class="codicon codicon-type"></i>
+          {{ t('components.settings.appearanceSettings.userMessageFontSize.title') }}
+        </label>
+        <p class="field-description">{{ t('components.settings.appearanceSettings.userMessageFontSize.description') }}</p>
+
+        <div class="opacity-row">
+          <span class="opacity-label">{{ t('components.settings.appearanceSettings.userMessageFontSize.value') }}：{{ userMessageFontSize }}px</span>
+          <input
+            v-model.number="userMessageFontSize"
+            type="range"
+            min="8"
+            max="32"
+            step="1"
+            class="opacity-slider"
+            :disabled="isSaving"
+            @input="settingsStore.setUserMessageFontSize(userMessageFontSize)"
+          />
+        </div>
+        <p class="field-hint">{{ t('components.settings.appearanceSettings.userMessageFontSize.hint') }}</p>
+      </div>
+
+      <div class="form-group" data-search-anchor="assistant-message-font-size">
+        <label class="group-label">
+          <i class="codicon codicon-type"></i>
+          {{ t('components.settings.appearanceSettings.assistantMessageFontSize.title') }}
+        </label>
+        <p class="field-description">{{ t('components.settings.appearanceSettings.assistantMessageFontSize.description') }}</p>
+
+        <div class="opacity-row">
+          <span class="opacity-label">{{ t('components.settings.appearanceSettings.assistantMessageFontSize.value') }}：{{ assistantMessageFontSize }}px</span>
+          <input
+            v-model.number="assistantMessageFontSize"
+            type="range"
+            min="8"
+            max="32"
+            step="1"
+            class="opacity-slider"
+            :disabled="isSaving"
+            @input="settingsStore.setAssistantMessageFontSize(assistantMessageFontSize)"
+          />
+        </div>
+        <p class="field-hint">{{ t('components.settings.appearanceSettings.assistantMessageFontSize.hint') }}</p>
       </div>
 
       <div class="actions">

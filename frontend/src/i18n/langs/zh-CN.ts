@@ -2903,6 +2903,18 @@ const zhCN = {
                     opacity: '不透明度',
                     hint: '100 为完全不透明；数值越低面板背景越透明，文字与图标保持清晰。不影响远控端界面。'
                 },
+                userMessageFontSize: {
+                    title: '用户消息字号',
+                    description: '调节你发送的消息与输入框文字的字体大小。不改变 UI 其它部分的字号。',
+                    value: '字号',
+                    hint: '仅作用于聊天区用户消息与输入框；界面其它部分保持默认字号。'
+                },
+                assistantMessageFontSize: {
+                    title: 'AI 消息字号',
+                    description: '调节 AI 回复（含思考块与流式输出）的字体大小。不改变 UI 其它部分的字号。',
+                    value: '字号',
+                    hint: '仅作用于聊天区 AI 消息；界面其它部分保持默认字号。'
+                },
                 saveSuccess: '保存成功',
                 saveFailed: '保存失败'
             },
@@ -3030,6 +3042,7 @@ const zhCN = {
             open: '打开',
             recent: '最近打开...',
             refresh: '重新加载',
+            openInNewWindow: '打开为新页面（新窗口编辑）',
             memorySource: '内存内容',
             jumpToLine: '跳转行号',
             issuesFound: '发现 {count} 个语法问题',

@@ -70,6 +70,7 @@ AUDIT_REMEDIATION.md
 
 # electron desktop build artifacts
 electron-app/release/
+electron-app/release-*/
 electron-app/*.tar.gz
 
 # dev handover traces (removed from the repo)
@@ -87,4 +88,5 @@ credentials*
 secrets*
 *.secret
 # historical planning/research docs (mission complete, keep local)
+.graycode/
 .graycode/

@@ -2901,6 +2901,18 @@ const ja: LanguageMessages = {
                     opacity: '不透明度',
                     hint: '100 で完全不透明です。数値が低いほどパネルの背景が透明になり、文字とアイコンは鮮明なままです。遠隔操作 UI には影響しません。'
                 },
+                userMessageFontSize: {
+                    title: 'ユーザーメッセージの文字サイズ',
+                    description: '送信したメッセージと入力欄の文字サイズを調整します。UI の他の部分には影響しません。',
+                    value: '文字サイズ',
+                    hint: 'チャットのユーザーメッセージと入力欄にのみ適用され、UI の他の部分は既定サイズのままです。'
+                },
+                assistantMessageFontSize: {
+                    title: 'AI メッセージの文字サイズ',
+                    description: 'AI の返信（思考ブロックとストリーミング表示を含む）の文字サイズを調整します。UI の他の部分には影響しません。',
+                    value: '文字サイズ',
+                    hint: 'チャットの AI メッセージにのみ適用され、UI の他の部分は既定サイズのままです。'
+                },
                 saveSuccess: '保存しました',
                 saveFailed: '保存に失敗しました'
             },
@@ -3028,6 +3040,7 @@ const ja: LanguageMessages = {
             open: '開く',
             recent: '最近開いた...',
             refresh: '再読み込み',
+            openInNewWindow: '新しいウィンドウで開く（編集）',
             memorySource: 'メモリ内コンテンツ',
             jumpToLine: '行番号へ移動',
             issuesFound: '構文エラーを {count} 件検出',

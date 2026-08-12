@@ -59,12 +59,17 @@ const SubAgentMonitor = withLazyFallback('SubAgentMonitor', () => import('./comp
 const DiffViewerPanel = withLazyFallback('DiffViewerPanel', () => import('./components/diff/DiffViewerPanel.vue'))
 const CodeViewPanel = withLazyFallback('CodeViewPanel', () => import('./components/codeView/CodeViewPanel.vue'))
 const UpdateModal = withLazyFallback('UpdateModal', () => import('./components/common/UpdateModal.vue'))
+// 独立文件编辑新窗口（桌面版「打开为新页面」）：轻量页面，不依赖主聊天时间线
+const FileEditorPage = withLazyFallback('FileEditorPage', () => import('./components/fileEditor/FileEditorPage.vue'))
 
 // i18n
 const { t, actualLanguage } = useI18n()
 
 // SubAgent Monitor 复用同一个前端入口，但不应初始化主聊天时间线。
 const isSubAgentMonitor = window.__GRAYCODE_VIEW_MODE === 'subagentMonitor'
+
+// 独立文件编辑新窗口（桌面版「打开为新页面」）：自包含轻量页面，不初始化主聊天时间线。
+const isFileEditor = window.__GRAYCODE_VIEW_MODE === 'fileEditor'
 
 // 语言是否已加载
 const languageLoaded = ref(false)
@@ -674,6 +679,23 @@ watch(
   },
   { immediate: true }
 )
+// 聊天消息字号 → CSS 变量：仅作用于消息区（用户消息/输入框与 AI 消息），不改变 UI 其它部分字号
+watch(
+  () => settingsStore.userMessageFontSize,
+  (size) => {
+    const normalized = typeof size === 'number' && Number.isFinite(size) ? size : 13
+    document.documentElement.style.setProperty('--gc-msg-user-font-size', normalized + 'px')
+  },
+  { immediate: true }
+)
+watch(
+  () => settingsStore.assistantMessageFontSize,
+  (size) => {
+    const normalized = typeof size === 'number' && Number.isFinite(size) ? size : 13
+    document.documentElement.style.setProperty('--gc-msg-assistant-font-size', normalized + 'px')
+  },
+  { immediate: true }
+)
 
 let mediaQueryDispose: (() => void) | null = null
 
@@ -720,6 +742,12 @@ async function loadLanguageSettings() {
       )
       settingsStore.setUiOpacity(
         typeof appearance.uiOpacity === 'number' ? appearance.uiOpacity : 100
+      )
+      settingsStore.setUserMessageFontSize(
+        typeof appearance.userMessageFontSize === 'number' ? appearance.userMessageFontSize : 13
+      )
+      settingsStore.setAssistantMessageFontSize(
+        typeof appearance.assistantMessageFontSize === 'number' ? appearance.assistantMessageFontSize : 13
       )
       if (settingsStore.wallpaperPath) {
         loadWallpaperImage(settingsStore.wallpaperPath)
@@ -769,6 +797,12 @@ onMounted(async () => {
     // 注册音频解锁与可见性 hooks，面板内首个用户手势后即可按主窗口同一套焦点规则播放。
     disposeAudioUnlockHooks = registerGlobalAudioUnlockHooks()
     disposeVisibilityHooks = registerVisibilityChangeHooks()
+    return
+  }
+
+  if (isFileEditor) {
+    // 独立文件编辑窗口：FileEditorPage 完全自包含（读/写走 IPC 按窗口 clientId 路由），
+    // 不初始化主聊天时间线、不加载设置、不注册音频 hooks，避免触发无意义的后端初始化。
     return
   }
 
@@ -962,6 +996,7 @@ onBeforeUnmount(() => {
 
 <template>
   <SubAgentMonitor v-if="isSubAgentMonitor" />
+  <FileEditorPage v-else-if="isFileEditor" />
   <div v-else class="app-container">
     <!-- 桌面端自定义背景图（外观设置；透明度作用于图片层本身，内容层不受影响） -->
     <div

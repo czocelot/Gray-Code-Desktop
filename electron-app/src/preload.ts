@@ -66,3 +66,7 @@ const initialRunId = argValue('--graycode-initial-run-id');
 if (initialRunId) {
   contextBridge.exposeInMainWorld('__GRAYCODE_INITIAL_RUN_ID', initialRunId);
 }
+const fileEditorPath = argValue('--graycode-file-path');
+if (fileEditorPath) {
+  contextBridge.exposeInMainWorld('__GRAYCODE_FILE_PATH', fileEditorPath);
+}

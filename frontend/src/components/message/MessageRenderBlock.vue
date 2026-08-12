@@ -428,7 +428,8 @@ onUnmounted(releaseThoughtDisplay)
 <style scoped>
 /* 思考块样式：三段式视图（折叠 / 中展开 / 完全展开） */
 .thought-block {
-  --lim-md-font-size: 12px;
+  /* 思考块比 AI 正文字号小 1px（默认 13→12），跟随 AI 消息字号设置 */
+  --lim-md-font-size: calc(var(--gc-msg-assistant-font-size, 13px) - 1px);
   --lim-md-line-height: 1.5;
   --lim-md-color: var(--vscode-descriptionForeground);
   --lim-md-font-style: italic;

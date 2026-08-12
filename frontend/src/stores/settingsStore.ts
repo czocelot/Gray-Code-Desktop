@@ -15,6 +15,16 @@ export type AppView = 'chat' | 'history' | 'settings' | 'usage'
 /** 支持的语言（'auto' = 跟随系统，由 preload 注入的 __GRAYCODE_DETECTED_LANG 解析） */
 export type Language = 'auto' | 'zh-CN' | 'en' | 'ja'
 
+/** 聊天消息字号合法范围（像素） */
+const FONT_SIZE_MIN = 8
+const FONT_SIZE_MAX = 32
+
+/** 归一化聊天消息字号：非数值/越界回退到 13，其余四舍五入到合法区间 */
+function clampFontSize(size: number): number {
+  const n = Number.isFinite(size) ? Math.round(size) : 13
+  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, n))
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   // 当前视图（默认为聊天）
   const currentView = ref<AppView>('chat')
@@ -67,6 +77,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const wallpaperOpacity = ref(30)
   // 外观设置：桌面端 UI 不透明度（0-100 整数百分比，默认 100；输入框/设置面板等界面面板）
   const uiOpacity = ref(100)
+  // 外观设置：聊天用户消息字号（像素，默认 13，仅作用于用户消息显示与输入框文字）
+  const userMessageFontSize = ref(13)
+  // 外观设置：聊天 AI 消息字号（像素，默认 13，仅作用于 AI 消息显示）
+  const assistantMessageFontSize = ref(13)
   // 外观设置：桌面主题模式（light=亮色 / dark=暗色 / auto=跟随系统，默认 auto）
   const theme = ref<'light' | 'dark' | 'auto'>('auto')
   // 模式刷新计数器（用于通知组件刷新模式列表）
@@ -184,6 +198,16 @@ export const useSettingsStore = defineStore('settings', () => {
     uiOpacity.value = Math.min(100, Math.max(0, Math.round(opacity) || 0))
   }
 
+  // 设置外观：聊天用户消息字号（8-32px）
+  function setUserMessageFontSize(size: number) {
+    userMessageFontSize.value = clampFontSize(size)
+  }
+
+  // 设置外观：聊天 AI 消息字号（8-32px）
+  function setAssistantMessageFontSize(size: number) {
+    assistantMessageFontSize.value = clampFontSize(size)
+  }
+
   // 设置外观：桌面主题模式（light / dark / auto）
   function setTheme(mode: 'light' | 'dark' | 'auto') {
     theme.value = mode
@@ -215,6 +239,8 @@ export const useSettingsStore = defineStore('settings', () => {
     wallpaperImage,
     wallpaperOpacity,
     uiOpacity,
+    userMessageFontSize,
+    assistantMessageFontSize,
     theme,
     promptModesVersion,
     configsVersion,
@@ -238,6 +264,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setWallpaperImage,
     setWallpaperOpacity,
     setUiOpacity,
+    setUserMessageFontSize,
+    setAssistantMessageFontSize,
     setTheme,
     refreshPromptModes,
     refreshConfigs

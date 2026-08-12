@@ -10,6 +10,8 @@
  *   点按文件即可查看代码
  */
 import { computed, nextTick, ref, watch } from 'vue'
+import { MESSAGE_NAMES } from '@shared/protocol'
+import { sendToExtension } from '@/utils/vscode'
 import { useI18n } from '@/i18n'
 import { useCodeViewStore, type CodeTreeNode } from '@/stores/codeViewStore'
 import { getFileIcon, getFolderIcon } from '@/utils/fileIcons'
@@ -74,6 +76,17 @@ async function handleOpenPath() {
   const ok = await codeViewStore.openPath(target)
   if (!ok) {
     pathError.value = t('components.codeView.errors.openFailed')
+  }
+}
+
+/** 「打开为新页面」：请求主进程打开独立编辑新窗口（仅磁盘文件可编辑） */
+async function handleOpenInNewWindow() {
+  const target = (codeViewStore.path || '').trim()
+  if (!target) return
+  try {
+    await sendToExtension(MESSAGE_NAMES['fileEditor.openWindow'], { path: target })
+  } catch (err) {
+    console.error('Failed to open file editor window:', err)
   }
 }
 
@@ -171,6 +184,14 @@ function onClose() {
       </span>
       <span class="code-path" :title="codeViewStore.path">{{ codeViewStore.path }}</span>
       <div class="code-header-actions">
+        <button
+          class="code-btn"
+          type="button"
+          :disabled="codeViewStore.source !== 'disk' || !codeViewStore.path"
+          :title="t('components.codeView.openInNewWindow')"
+          @click="handleOpenInNewWindow"
+        ><span class="codicon codicon-window"></span>
+        </button>
         <button
           class="code-btn"
           type="button"

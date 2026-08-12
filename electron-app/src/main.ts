@@ -209,6 +209,16 @@ Logger.setLevel(LogLevel.INFO);
 let mainWindow: BrowserWindow | null = null;
 let backendHost: BackendHost | null = null;
 
+// ============================================================================
+// 独立文件编辑新窗口（桌面版「打开为新页面」）
+// ============================================================================
+/** 文件编辑新窗口集合（closed 时移除；isTrustedSender 与 client 注册依赖它） */
+const fileEditorWindows = new Set<BrowserWindow>();
+/** 文件编辑窗口 clientId 计数器（file-editor-<n>，每个窗口独立 clientId 精确路由响应） */
+let fileEditorCounter = 0;
+/** BackendHost 懒加载就绪前创建的编辑窗口：client 注册排队，就绪后统一补注册 */
+const pendingFileEditorRegistrations: Array<() => void> = [];
+
 // ===== 电源/冻结防御（Windows 空闲挂起：前端壳无响应而后端正常） =====
 // powerMonitor 监听只注册一次（macOS activate 重建窗口时跳过重复注册）；
 // rendererProbeTimer/rendererProbeFailures 为渲染进程健康自检探针状态。
@@ -557,12 +567,15 @@ function registerNativeOps(): void {
   setOpenWorkspaceHandler((fsPath) => void openWorkspaceFolder(fsPath));
 }
 
-/** IPC 发送方校验：必须是主窗口自身的主框架 */
+/** IPC 发送方校验：必须是主窗口或文件编辑新窗口自身的主框架 */
 function isTrustedSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
   const senderFrame = (event as any).senderFrame as Electron.WebFrameMain | undefined;
-  if (!senderFrame) return event.sender === mainWindow.webContents;
-  return senderFrame.top === senderFrame && event.sender === mainWindow.webContents;
+  if (senderFrame && senderFrame.top !== senderFrame) return false;
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) return true;
+  for (const win of fileEditorWindows) {
+    if (!win.isDestroyed() && event.sender === win.webContents) return true;
+  }
+  return false;
 }
 
 // ============================================================================
@@ -603,6 +616,8 @@ function createBackend(): void {
       onMenuLanguageChange: (lang) => rebuildMenu(lang),
       // 渲染层主题生效后同步原生窗口背景色与 nativeTheme（含 auto 解析后的实际主题）
       onThemeChange: (theme) => applyDesktopThemeToWindow(theme),
+      // 渲染层请求「打开为新页面」：创建独立文件编辑新窗口
+      onOpenFileEditorWindow: (filePath) => createFileEditorWindow(filePath),
       // 界面语言为 auto/未配置时的系统 locale 回退（app.getLocale）
       systemLocale: () => app.getLocale()
     });
@@ -610,6 +625,16 @@ function createBackend(): void {
     // 工作区恢复必须在 backendHost 就绪后执行（懒加载就绪前 createWindow 里
     // backendHost 仍为 null，放这里保证恢复只跑一次、且早于渲染层 splashDone）。
     restoreWorkspace();
+
+    // 补注册懒加载窗口期内创建的编辑窗口 client（响应按 clientId 精确路由回对应窗口）
+    const pendingEditors = pendingFileEditorRegistrations.splice(0);
+    for (const register of pendingEditors) {
+      try {
+        register();
+      } catch (err) {
+        console.error('[main] failed to register file-editor client:', err);
+      }
+    }
 
     // 补投懒加载窗口期内到达的渲染层消息（窗口可能在 BackendHost 就绪前完成加载）
     const queued = pendingRendererMessages.splice(0);
@@ -1449,6 +1474,115 @@ function createWindow(): void {
       }, 12000);
     });
   }
+}
+
+// ============================================================================
+// 独立文件编辑新窗口（桌面版「打开为新页面」）
+//
+// 从主窗口代码查看面板点击「打开为新页面」→ 渲染层发 fileEditor.openWindow →
+// BackendHost onOpenFileEditorWindow → 本函数创建独立 BrowserWindow。新窗口加载
+// 同一份 frontend/dist，经 additionalArguments 注入 viewMode/filePath/clientId，
+// preload 读 argv 暴露为 __GRAYCODE_VIEW_MODE / __GRAYCODE_FILE_PATH /
+// __GRAYCODE_WEBVIEW_CLIENT_ID；前端据此渲染 FileEditorPage（纯文本编辑页）。
+// 安全基线复刻主窗口：contextIsolation + sandbox，导航/新窗口策略一致。
+// ============================================================================
+function createFileEditorWindow(filePath: string): void {
+  if (!filePath) return;
+
+  // 同一文件已有编辑窗口：聚焦并恢复，避免重复开窗
+  for (const win of fileEditorWindows) {
+    if (win.isDestroyed()) continue;
+    if ((win as any).__fileEditorPath === filePath) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      return;
+    }
+  }
+
+  const clientId = `file-editor-${++fileEditorCounter}`;
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 800,
+    minWidth: 560,
+    minHeight: 420,
+    show: false,
+    // 初始背景跟随应用主题（与主窗口同一套预读逻辑）
+    backgroundColor: resolveWindowBackgroundColor(),
+    autoHideMenuBar: true,
+    icon: path.join(REPO_ROOT, 'resources', 'icon.png'),
+    title: `GrayCode \u2014 ${path.basename(filePath)}`,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+      spellcheck: false,
+      // preload 经 process.argv 读取并 expose 为 window.__GRAYCODE_* 全局
+      additionalArguments: [
+        '--graycode-view-mode=fileEditor',
+        `--graycode-file-path=${filePath}`,
+        `--graycode-webview-client-id=${clientId}`
+      ]
+    }
+  });
+  (win as any).__fileEditorPath = filePath;
+  fileEditorWindows.add(win);
+
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show();
+  });
+
+  // 主题变量 / codicon 字体 / overlay 由主进程注入（与主窗口同一套）
+  win.webContents.on('did-finish-load', () => {
+    void injectDesktopRendererAssets(win);
+  });
+
+  // 安全策略与主窗口一致：拒绝新窗口，http/https 走系统浏览器，导航限定 graycode://local/
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'mailto:') {
+        void import('electron').then(({ shell }) => shell.openExternal(url));
+      }
+    } catch {
+      // 非法 URL 忽略
+    }
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith(`${CUSTOM_SCHEME}://local/`)) {
+      event.preventDefault();
+    }
+  });
+
+  // 注册 webview client：该窗口发起的请求响应按 clientId 精确路由回本窗口
+  let clientDispose: (() => void) | null = null;
+  const registerClient = () => {
+    if (clientDispose || !backendHost) return;
+    const registration = backendHost.registerFileEditorClient(clientId, (message) => {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('graycode:backend-to-renderer', message);
+      }
+    });
+    clientDispose = () => registration.dispose();
+  };
+  if (backendHost) {
+    registerClient();
+  } else {
+    // BackendHost 懒加载未就绪：排队，就绪后补注册（见 createBackend）
+    pendingFileEditorRegistrations.push(registerClient);
+  }
+
+  win.on('closed', () => {
+    fileEditorWindows.delete(win);
+    clientDispose?.();
+    clientDispose = null;
+  });
+
+  win.loadURL(`${CUSTOM_SCHEME}://local/frontend/dist/index.html`).catch((error) => {
+    console.error('Failed to load file editor window:', error);
+  });
 }
 
 // ============================================================================

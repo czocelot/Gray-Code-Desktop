@@ -219,6 +219,10 @@ export const MESSAGE_NAMES = {
   readWorkspaceTextFile: 'readWorkspaceTextFile',
   refreshSkills: 'refreshSkills',
 
+// ---- 文件编辑新窗口（桌面版「打开为新页面」） ----
+  'fileEditor.openWindow': 'fileEditor.openWindow',
+  'fileEditor.saveFile': 'fileEditor.saveFile',
+
 // ---- 窗口 ----
   reloadWindow: 'reloadWindow',
 
@@ -790,7 +794,4 @@ export type CheckpointSummaryWithSize = CheckpointSummary & { size: number };
 //      CheckpointSummary / CheckpointSummaryWithSize（T16，两端统一为契约超集）；
 //    - CheckpointManifest / CheckpointIgnoreSnapshot / CheckpointExcludedEntry 等检查点
 //      类型仍分属 backend/modules/checkpoint/types.ts，未纳入本阶段范围。
-
-//      类型仍分属 backend/modules/checkpoint/types.ts，未纳入本阶段范围。
-
 

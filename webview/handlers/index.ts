@@ -18,6 +18,7 @@ import { registerDependencyHandlers } from './DependencyHandlers';
 import { registerStoragePathHandlers } from './StoragePathHandlers';
 import { registerContextHandlers } from './ContextHandlers';
 import { registerFileHandlers } from './FileHandlers';
+import { registerFileEditorHandlers } from './file/FileEditorHandlers';
 import { registerDiffHandlers } from './DiffHandlers';
 import { registerChatHandlers } from './ChatHandlers';
 import { registerSkillsHandlers } from './SkillsHandlers';
@@ -86,6 +87,7 @@ export function createMessageHandlerRegistry(): Map<string, MessageHandler> {
   registerContextHandlers(registry);
   // 本地 FileHandlers 为完整实现（含多工作区/安全加固/审批门），后注册覆盖上游拆分文件的同名消息。
   registerFileHandlers(registry);
+  registerFileEditorHandlers(registry);
   registerDiffHandlers(registry);
   registerChatHandlers(registry);
   registerSkillsHandlers(registry);

@@ -2901,6 +2901,18 @@ const en: LanguageMessages = {
                     opacity: 'Opacity',
                     hint: '100 is fully opaque; lower values make panel backgrounds more transparent while text and icons stay crisp. The remote control UI is not affected.'
                 },
+                userMessageFontSize: {
+                    title: 'User Message Font Size',
+                    description: 'Adjust the font size of your sent messages and the input box text. UI elements are not affected.',
+                    value: 'Font size',
+                    hint: 'Applies only to chat user messages and the input box; the rest of the UI keeps its default size.'
+                },
+                assistantMessageFontSize: {
+                    title: 'AI Message Font Size',
+                    description: 'Adjust the font size of AI replies (including thinking blocks and streaming text). UI elements are not affected.',
+                    value: 'Font size',
+                    hint: 'Applies only to AI messages in the chat; the rest of the UI keeps its default size.'
+                },
                 saveSuccess: 'Saved successfully',
                 saveFailed: 'Save failed'
             },
@@ -3028,6 +3040,7 @@ const en: LanguageMessages = {
             open: 'Open',
             recent: 'Recent...',
             refresh: 'Reload',
+            openInNewWindow: 'Open in a new window (edit)',
             memorySource: 'In-memory content',
             jumpToLine: 'Jump to line',
             issuesFound: '{count} syntax issue(s) found',

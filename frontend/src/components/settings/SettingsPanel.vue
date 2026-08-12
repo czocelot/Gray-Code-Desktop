@@ -684,6 +684,18 @@ const SEARCH_INDEX: SearchIndexEntry[] = [
     anchor: '[data-search-anchor="ui-opacity"]'
   },
   {
+    key: 'appearance-user-message-font-size', tab: 'appearance',
+    labelKey: 'components.settings.appearanceSettings.userMessageFontSize.title',
+    keywords: ['字号', '字体', '大小', 'font', 'size', '文字', '用户消息', '输入', 'フォント', 'サイズ'],
+    anchor: '[data-search-anchor="user-message-font-size"]'
+  },
+  {
+    key: 'appearance-assistant-message-font-size', tab: 'appearance',
+    labelKey: 'components.settings.appearanceSettings.assistantMessageFontSize.title',
+    keywords: ['字号', '字体', '大小', 'font', 'size', '文字', 'AI', '消息', '回复', 'フォント', 'サイズ'],
+    anchor: '[data-search-anchor="assistant-message-font-size"]'
+  },
+  {
     key: 'memory', tab: 'memory',
     labelKey: 'components.settings.settingsPanel.sections.memory.title',
     keywords: ['记忆', 'memory', 'メモリ', '长期记忆', '向量', '检索', 'retrieval', '知识', '条目']
@@ -1972,6 +1984,18 @@ onMounted(() => {
   animation: settings-search-flash 1.6s ease;
 }
 
+@keyframes settings-search-flash {
+  0% {
+    background-color: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+  }
+  60% {
+    background-color: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+</style>
 @keyframes settings-search-flash {
   0% {
     background-color: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
