@@ -3053,6 +3053,11 @@ const ja: LanguageMessages = {
                 openFailed: 'ファイルを開けませんでした'
             }
         },
+        fileEditor: {
+            closeConfirmTitle: '保存されていない変更があります',
+            closeConfirmMessage: '保存されていない変更があります。閉じてもよろしいですか？変更は保存されません。',
+            closeConfirmButton: '閉じる'
+        },
         channels: {
             common: {
                 temperature: {

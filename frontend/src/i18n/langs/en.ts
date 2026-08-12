@@ -3053,6 +3053,11 @@ const en: LanguageMessages = {
                 openFailed: 'Failed to open file'
             }
         },
+        fileEditor: {
+            closeConfirmTitle: 'Unsaved changes',
+            closeConfirmMessage: 'You have unsaved changes. Close anyway? Changes will not be saved.',
+            closeConfirmButton: 'Close anyway'
+        },
         channels: {
             common: {
                 temperature: {

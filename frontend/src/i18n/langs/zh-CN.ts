@@ -3055,6 +3055,11 @@ const zhCN = {
                 openFailed: '打开文件失败'
             }
         },
+        fileEditor: {
+            closeConfirmTitle: '有未保存的更改',
+            closeConfirmMessage: '有未保存的更改，确定关闭吗？更改将不会保存。',
+            closeConfirmButton: '确定关闭'
+        },
         channels: {
             common: {
                 temperature: {

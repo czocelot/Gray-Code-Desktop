@@ -12,7 +12,7 @@ import { InputArea } from './components/input'
 import BackgroundTaskBar from './components/backgroundTasks/BackgroundTaskBar.vue'
 import { WelcomePanel } from './components/home'
 import { ConversationTabs } from './components/tabs'
-import { CustomScrollbar } from './components/common'
+import { CustomScrollbar, ConfirmDialog } from './components/common'
 import Splash from './components/Splash.vue'
 import StartupBackdrop from './components/StartupBackdrop.vue'
 import { useChatStore, useDiffStore, useSettingsStore, useTerminalStore, useCodeViewStore } from './stores'
@@ -336,12 +336,29 @@ function handleFileTabDirty(dirty: boolean): void {
   }
 }
 
+// 文件编辑标签页关闭确认（tab 栏 × 路径）：有未保存更改时经自研 ConfirmDialog 确认。
+// window.confirm 在 Electron 渲染进程同步阻塞且行为不可靠——确认后可能返回异常导致
+// 标签页无法关闭（界面表现为卡住），故改用纯 DOM 异步确认框（与 DirtyFilesConfirm 同款）。
+const pendingCloseFileTabId = ref<string | null>(null)
+const showCloseFileTabConfirm = ref(false)
+
 // 关闭标签页：文件编辑标签页有未保存更改时先确认（覆盖 tab 栏 × 按钮路径）
 function handleCloseTab(tabId: string): void {
   const tab = chatStore.openTabs.find(t => t.id === tabId)
   if (tab?.kind === 'file' && fileTabDirty.get(tabId)) {
-    if (!window.confirm('有未保存的更改，确定关闭吗？')) return
+    pendingCloseFileTabId.value = tabId
+    showCloseFileTabConfirm.value = true
+    return
   }
+  chatStore.closeTab(tabId)
+  fileTabDirty.delete(tabId)
+}
+
+// 确认丢弃未保存更改并关闭文件编辑标签页
+function confirmCloseFileTab(): void {
+  const tabId = pendingCloseFileTabId.value
+  pendingCloseFileTabId.value = null
+  if (!tabId) return
   chatStore.closeTab(tabId)
   fileTabDirty.delete(tabId)
 }
@@ -1237,6 +1254,16 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+    <!-- 文件编辑标签页未保存更改关闭确认（自研纯 DOM 确认框，避免 Electron window.confirm 卡住） -->
+    <ConfirmDialog
+      v-model="showCloseFileTabConfirm"
+      :title="t('components.fileEditor.closeConfirmTitle')"
+      :message="t('components.fileEditor.closeConfirmMessage')"
+      :confirm-text="t('components.fileEditor.closeConfirmButton')"
+      :is-danger="true"
+      @confirm="confirmCloseFileTab"
+    />
+    </div>
     </div>
 
     <!-- 历史页面（惰性挂载 + v-show 保活，保留滚动位置） -->

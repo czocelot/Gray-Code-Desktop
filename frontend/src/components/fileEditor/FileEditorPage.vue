@@ -10,6 +10,7 @@
 import { computed, ref, watch } from 'vue'
 import { MESSAGE_NAMES } from '@shared/protocol'
 import { sendToExtension } from '@/utils/vscode'
+import { ConfirmDialog } from '../common'
 
 const props = defineProps<{ filePath: string }>()
 const emit = defineEmits<{ close: []; 'dirty-change': [dirty: boolean] }>()
@@ -103,9 +104,13 @@ async function saveFile(): Promise<void> {
   }
 }
 
-/** 关闭标签页：有未保存更改时先确认（由父组件调用 closeTab） */
+/** 关闭标签页：有未保存更改时先经自研 ConfirmDialog 确认（window.confirm 在 Electron
+ *  渲染进程同步阻塞且行为不可靠——确认后可能返回异常导致标签页无法关闭，界面表现为
+ *  「卡住」）；无未保存更改直接关闭。 */
+const showCloseConfirm = ref(false)
 function closeTab(): void {
-  if (dirty.value && !window.confirm(T('有未保存的更改，确定关闭吗？', 'You have unsaved changes. Close anyway?'))) {
+  if (dirty.value) {
+    showCloseConfirm.value = true
     return
   }
   emit('close')
@@ -181,6 +186,16 @@ watch(() => props.filePath, () => {
         @keydown="handleKeydown"
       ></textarea>
     </div>
+
+    <!-- 未保存更改关闭确认（自研纯 DOM 确认框，避免 Electron window.confirm 卡住） -->
+    <ConfirmDialog
+      v-model="showCloseConfirm"
+      :title="T('有未保存的更改', 'Unsaved changes')"
+      :message="T('有未保存的更改，确定关闭吗？更改将不会保存。', 'You have unsaved changes. Close anyway? Changes will not be saved.')"
+      :confirm-text="T('确定关闭', 'Close anyway')"
+      :is-danger="true"
+      @confirm="emit('close')"
+    />
   </div>
 </template>
 
