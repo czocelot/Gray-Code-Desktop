@@ -1264,7 +1264,6 @@ onBeforeUnmount(() => {
       @confirm="confirmCloseFileTab"
     />
     </div>
-    </div>
 
     <!-- 历史页面（惰性挂载 + v-show 保活，保留滚动位置） -->
     <HistoryPage v-if="languageLoaded && visitedViews.history" v-show="settingsStore.currentView === 'history'" />
