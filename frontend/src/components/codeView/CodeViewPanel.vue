@@ -84,6 +84,10 @@ async function handleOpenInNewTab() {
   if (!target) return
   const chatStore = useChatStore()
   chatStore.openFileTab(target)
+  // 关闭代码查看抽屉：抽屉是绝对定位覆盖层（z-index 130、宽可达 92%），
+  // 若保持 open，切回对话标签页时 chat-body 重建会重新渲染抽屉并盖住聊天区
+  // （窄窗口下输入框被遮挡无法点击），因此打开为新页面后必须关闭抽屉。
+  codeViewStore.close()
 }
 
 function handleOpenRecent(filePath: string) {

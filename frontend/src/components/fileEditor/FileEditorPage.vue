@@ -189,7 +189,9 @@ watch(() => props.filePath, () => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--vscode-editor-background, #1e1e1e);
+  /* 半透明表面色：随「UI 不透明度」设置（--gc-ui-opacity）color-mix 混合透明，
+     文字/图标保持全不透明；编辑器区背景可透出桌面背景图/窗口背景 */
+  background: var(--gc-surface-editor-bg, var(--vscode-editor-background, #1e1e1e));
   color: var(--vscode-foreground, #cccccc);
   font-family: var(--vscode-font-family, sans-serif);
 }
@@ -334,7 +336,7 @@ watch(() => props.filePath, () => {
   border: none;
   outline: none;
   padding: 12px 16px;
-  background: var(--vscode-editor-background, #1e1e1e);
+  background: var(--gc-surface-editor-bg, var(--vscode-editor-background, #1e1e1e));
   color: var(--vscode-editor-foreground, #cccccc);
   font-family: var(--vscode-editor-font-family, Consolas, 'Courier New', monospace);
   font-size: var(--vscode-editor-font-size, 13px);
