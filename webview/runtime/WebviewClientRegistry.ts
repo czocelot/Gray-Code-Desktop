@@ -8,9 +8,7 @@ import { PUSH_MESSAGE_NAMES } from '../../shared/protocol';
  */
 export const WEBVIEW_CLIENT_IDS = {
   mainChat: 'main-chat',
-  subagentMonitor: 'subagent-monitor',
-  /** 独立文件编辑新窗口（桌面版「打开为新页面」） */
-  fileEditor: 'file-editor'
+  subagentMonitor: 'subagent-monitor'
 } as const;
 
 export type KnownWebviewClientId = typeof WEBVIEW_CLIENT_IDS[keyof typeof WEBVIEW_CLIENT_IDS];

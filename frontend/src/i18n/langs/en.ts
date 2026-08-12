@@ -3040,7 +3040,7 @@ const en: LanguageMessages = {
             open: 'Open',
             recent: 'Recent...',
             refresh: 'Reload',
-            openInNewWindow: 'Open in a new window (edit)',
+            openInNewTab: 'Open as new tab (edit)',
             memorySource: 'In-memory content',
             jumpToLine: 'Jump to line',
             issuesFound: '{count} syntax issue(s) found',

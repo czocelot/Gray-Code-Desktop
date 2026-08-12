@@ -137,8 +137,6 @@ export interface BackendHostOptions {
   native: <T = any>(op: string, payload?: any) => Promise<T>;
   /** Called when the backend wants to open a diff preview in the renderer. */
   onOpenDiffPreview: (payload: any) => void;
-  /** 桌面版：请求主进程打开独立文件编辑新窗口（「打开为新页面」）。 */
-  onOpenFileEditorWindow?: (filePath: string) => void;
   /** 渲染层上报 UI 语言切换后回调（主进程据此重建应用菜单文案）。 */
   onMenuLanguageChange?: (lang: string) => void;
   /** 渲染层上报主题生效后回调（主进程据此同步原生窗口背景色与 nativeTheme.themeSource）。 */
@@ -392,65 +390,6 @@ export class BackendHost {
       },
       isAlive: () => typeof sendTo === 'function'
     });
-  }
-
-  /**
-   * 注册独立文件编辑新窗口的 webview client（桌面版「打开为新页面」）。
-   * 每个窗口使用独立 clientId（file-editor-<n>），响应精确路由回对应窗口。
-   */
-  registerFileEditorClient(
-    clientId: string,
-    sendTo: (message: any) => void
-  ): { dispose(): void } {
-    return this.clientRegistry.register({
-      clientId: clientId || WEBVIEW_CLIENT_IDS.fileEditor,
-      postMessage: (message) => {
-        sendTo?.(message);
-        return true;
-      },
-      isAlive: () => typeof sendTo === 'function'
-    });
-  }
-
-  /** 是否文件编辑新窗口消息（clientId 为 file-editor 或 file-editor-<n>） */
-  private isFileEditorMessage(clientId: unknown): boolean {
-    return (
-      clientId === WEBVIEW_CLIENT_IDS.fileEditor ||
-      (typeof clientId === 'string' && clientId.startsWith(WEBVIEW_CLIENT_IDS.fileEditor + '-'))
-    );
-  }
-
-  /**
-   * Route a message originating from a file-editor window.
-   * Responses are delivered through the WebviewClientRegistry (the window's own
-   * clientId), so they reach the correct editor window instead of the main chat.
-   */
-  async routeFileEditorMessage(message: any): Promise<void> {
-    await this.initPromise;
-    const { type, data, requestId, clientId } = message || {};
-    if (!type) return;
-    const routedClientId =
-      typeof clientId === 'string' && clientId.startsWith(WEBVIEW_CLIENT_IDS.fileEditor + '-')
-        ? clientId
-        : WEBVIEW_CLIENT_IDS.fileEditor;
-    const ctx = { ...this.createHandlerContext(requestId) };
-    ctx.clientId = routedClientId;
-    ctx.sendResponse = (id, res) => {
-      this.clientRegistry.sendResponse(routedClientId, id, res);
-    };
-    ctx.sendError = (id, code, msg) => {
-      this.clientRegistry.sendError(routedClientId, id, code, msg);
-    };
-    ctx.postMessage = (msg) => this.clientRegistry.postMessage(routedClientId, msg);
-    const handled = await this.messageRouter.route(type, data, requestId, ctx, routedClientId);
-    if (!handled && requestId) {
-      this.clientRegistry.sendError(
-        routedClientId,
-        requestId,
-        'UNKNOWN_TYPE',
-        `Unknown message type: ${type}`
-      );
-    }
   }
 
   /**
@@ -1214,13 +1153,6 @@ export class BackendHost {
           conversationId
         });
       },
-      openFileEditorWindow: (filePath?: string) => {
-        try {
-          this.options.onOpenFileEditorWindow?.(filePath || '');
-        } catch (err) {
-          console.error('[BackendHost] openFileEditorWindow callback error:', err);
-        }
-      },
       remoteControlStatus: () => this.remoteControlServer?.getStatus() ?? {
         available: false,
         enabled: false,
@@ -1259,21 +1191,6 @@ export class BackendHost {
           this.postToRenderer('error', requestId, 'SUBAGENT_MONITOR_HANDLER_ERROR', String(err));
         }
       });
-      return;
-    }
-
-    // 独立文件编辑新窗口（桌面版「打开为新页面」）的消息：响应按窗口自己的
-    // clientId 经 WebviewClientRegistry 路由回对应窗口，不投递到主聊天。
-    if (this.isFileEditorMessage(clientId)) {
-      this.messageHandlingQueue = this.messageHandlingQueue
-        .then(() =>
-          this.handleWithTimeout(
-            this.routeFileEditorMessage(message),
-            message?.requestId,
-            typeof clientId === 'string' ? clientId : undefined
-          )
-        )
-        .catch((err) => console.error('[BackendHost] file-editor message handling error:', err));
       return;
     }
 
@@ -1405,29 +1322,19 @@ export class BackendHost {
   }
 
   /** 给单个消息处理加超时：超时对该请求回 error（格式与 routeMessage 的错误响应一致），
-   *  并放行队列让后续消息继续处理，避免一条卡死的 handler 永久冻结 IPC 通道。
-   *  @param routedClientId 可选：file-editor 窗口的 clientId（超时错误投递回对应窗口） */
-  private async handleWithTimeout(work: Promise<void>, requestId?: string, routedClientId?: string): Promise<void> {
+   *  并放行队列让后续消息继续处理，避免一条卡死的 handler 永久冻结 IPC 通道。 */
+  private async handleWithTimeout(work: Promise<void>, requestId?: string): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
-    const timedOut = new Promise<void>((resolve) => {
+ const timedOut = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         console.error('[BackendHost] message handling timed out:', requestId);
         if (requestId) {
-          if (routedClientId && this.isFileEditorMessage(routedClientId)) {
-            this.clientRegistry.sendError(
-              routedClientId,
-              requestId,
-              'HANDLER_TIMEOUT',
-              'Message handler timed out (60s); the request has been dropped.'
-            );
-          } else {
-            this.postToRenderer(
-              'error',
-              requestId,
-              'HANDLER_TIMEOUT',
-              'Message handler timed out (60s); the request has been dropped.'
-            );
-          }
+          this.postToRenderer(
+            'error',
+            requestId,
+            'HANDLER_TIMEOUT',
+            'Message handler timed out (60s); the request has been dropped.'
+          );
         }
         resolve();
       }, BackendHost.MESSAGE_HANDLING_TIMEOUT_MS);

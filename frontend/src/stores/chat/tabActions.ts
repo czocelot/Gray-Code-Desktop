@@ -196,6 +196,8 @@ export function createTab(
     conversationId?: string | null
     title?: string
     switchTo?: boolean
+    kind?: 'chat' | 'file'
+    filePath?: string
   }
 ): string | null {
   // 检查上限
@@ -207,7 +209,7 @@ export function createTab(
   const tabId = generateTabId()
   const convId = options?.conversationId ?? null
 
-  // 如果目标对话已在某个标签页中打开，直接切换到那个标签页
+  // 如果目标对话已在某个标签页中打开，直接切换到那个标签页（文件编辑标签页无 conversationId，跳过）
   if (convId) {
     const existingTab = state.openTabs.value.find(t => t.conversationId === convId)
     if (existingTab) {
@@ -219,7 +221,9 @@ export function createTab(
     id: tabId,
     conversationId: convId,
     title: options?.title || 'New Chat',
-    isStreaming: false
+    isStreaming: false,
+    kind: options?.kind,
+    filePath: options?.filePath
   }
 
   state.openTabs.value = [...state.openTabs.value, tab]

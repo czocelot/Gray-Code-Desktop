@@ -10,10 +10,9 @@
  *   点按文件即可查看代码
  */
 import { computed, nextTick, ref, watch } from 'vue'
-import { MESSAGE_NAMES } from '@shared/protocol'
-import { sendToExtension } from '@/utils/vscode'
 import { useI18n } from '@/i18n'
 import { useCodeViewStore, type CodeTreeNode } from '@/stores/codeViewStore'
+import { useChatStore } from '@/stores/chatStore'
 import { getFileIcon, getFolderIcon } from '@/utils/fileIcons'
 import { hljs } from '@/utils/highlightSetup'
 import { issuesByLine } from '@/utils/syntaxCheck'
@@ -79,15 +78,12 @@ async function handleOpenPath() {
   }
 }
 
-/** 「打开为新页面」：请求主进程打开独立编辑新窗口（仅磁盘文件可编辑） */
-async function handleOpenInNewWindow() {
+/** 「打开为新页面」：在与对话同级的标签页中打开文件编辑器（仅磁盘文件可编辑） */
+async function handleOpenInNewTab() {
   const target = (codeViewStore.path || '').trim()
   if (!target) return
-  try {
-    await sendToExtension(MESSAGE_NAMES['fileEditor.openWindow'], { path: target })
-  } catch (err) {
-    console.error('Failed to open file editor window:', err)
-  }
+  const chatStore = useChatStore()
+  chatStore.openFileTab(target)
 }
 
 function handleOpenRecent(filePath: string) {
@@ -188,9 +184,9 @@ function onClose() {
           class="code-btn"
           type="button"
           :disabled="codeViewStore.source !== 'disk' || !codeViewStore.path"
-          :title="t('components.codeView.openInNewWindow')"
-          @click="handleOpenInNewWindow"
-        ><span class="codicon codicon-window"></span>
+          :title="t('components.codeView.openInNewTab')"
+          @click="handleOpenInNewTab"
+        ><span class="codicon codicon-file-code"></span>
         </button>
         <button
           class="code-btn"

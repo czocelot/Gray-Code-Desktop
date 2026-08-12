@@ -26,9 +26,8 @@
   - 设置 → 外观 新增「用户消息字号」与「AI 消息字号」两个滑块（8-32px，默认 13）：用户消息字号作用于你发送的消息显示与输入框文字；AI 消息字号作用于 AI 回复正文、思考块与流式输出（思考块比正文小 1px 保持层级）；界面其它部分（标签栏/侧栏/按钮等）字号不受影响。
   - 持久化到 ui.appearance.userMessageFontSize / assistantMessageFontSize（可 Settings Sync），经 CSS 变量（--gc-msg-user-font-size / --gc-msg-assistant-font-size）应用，三语 i18n + 设置搜索锚点收录。
 
-### Added：代码查看面板「打开为新页面」——独立窗口编辑文件（桌面版）
-  - 代码查看面板（CodeView）头部新增「打开为新页面」按钮（磁盘文件可用）：点击后在独立 BrowserWindow 中打开纯文本编辑器，可编辑工作区内文本文件并 Ctrl+S 保存（新增 fileEditor.openWindow / fileEditor.saveFile 消息；写文件复用工作区包含校验与 realpath 复核，与 read/writeWorkspaceTextFile 同口径）。
-  - 新窗口经 additionalArguments 注入 viewMode/filePath/clientId，前端按 __GRAYCODE_VIEW_MODE === 'fileEditor' 渲染 FileEditorPage（自包含，不初始化主聊天时间线）；响应按窗口独立 clientId（file-editor-<n>）经 WebviewClientRegistry 精确路由回对应窗口；同一文件重复点击聚焦已有窗口；安全基线复刻主窗口（contextIsolation + sandbox + 导航限定 graycode://local/）。
+### Added：代码查看面板「打开为新页面」——同级标签页编辑文件（桌面版）
+  - 代码查看面板（CodeView）头部新增「打开为新页面」按钮（磁盘文件可用）：点击后在**与对话同级的标签页栏**打开纯文本编辑器页签（与「新建标签页」同一层级，可拖拽排序/切换/关闭），编辑工作区内文本文件并 Ctrl+S 保存（fileEditor.saveFile 消息；写文件复用工作区包含校验与 realpath 复核，与 read/writeWorkspaceTextFile 同口径）；同一文件重复打开直接切换已有页签；未保存更改关闭前确认（覆盖页签栏 × 与页内关闭按钮两条路径）。
 
 ## [1.7.16] - 2026-08-12
 

@@ -746,6 +746,36 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 打开文件编辑标签页（桌面版「打开为新页面」）
+   *
+   * 与对话标签页同级的文件编辑器页签：已打开同一文件时直接切换过去，
+   * 否则新建 kind='file' 标签页并切换（标题取文件名）。
+   */
+  function openFileTab(filePath: string): string | null {
+    const target = (filePath || '').trim()
+    if (!target) return null
+
+    const existing = state.openTabs.value.find(
+      t => t.kind === 'file' && t.filePath === target
+    )
+    if (existing) {
+      switchTabWrapped(existing.id)
+      return existing.id
+    }
+
+    const fileName = target.replace(/\\/g, '/').split('/').pop() || target
+    const tabId = createTabAction(state, {
+      kind: 'file',
+      filePath: target,
+      title: fileName
+    })
+    if (tabId) {
+      switchTabWrapped(tabId)
+    }
+    return tabId
+  }
+
+  /**
    * 关闭标签页
    */
   function closeTabWrapped(tabId: string): void {
@@ -1102,6 +1132,7 @@ export const useChatStore = defineStore('chat', () => {
     activeTabId: state.activeTabId,
     sessionSnapshots: state.sessionSnapshots,
     createNewTab,
+    openFileTab,
     closeTab: closeTabWrapped,
     switchTab: switchTabWrapped,
     openConversationInTab,

@@ -1,10 +1,7 @@
 /**
- * 文件编辑新窗口消息处理器（桌面版「打开为新页面」）
+ * 文件编辑标签页消息处理器（桌面版「打开为新页面」）
  *
- * - openFileEditorWindow：主窗口代码查看面板请求主进程打开独立文件编辑新窗口。
- *   实际窗口创建由主进程完成（BackendHost options.onOpenFileEditorWindow → main.ts
- *   createFileEditorWindow）；VS Code 宿主不注入该回调，调用返回 false。
- * - saveFileEditorContent：新窗口编辑完成后保存（相对/绝对路径 → file:// URI →
+ * - saveFileEditorContent：文件编辑标签页保存（相对/绝对路径 → file:// URI →
  *   工作区包含校验（realpath 感知）→ 写入）。
  *
  * 安全约束（与 readWorkspaceTextFile / writeWorkspaceTextFile 同口径）：
@@ -15,40 +12,11 @@
 
 import { MESSAGE_NAMES } from '../../../shared/protocol';
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { t } from '../../../backend/i18n';
 import type { MessageHandler } from '../../types';
 import { isUriInsideWorkspaceRealpath, MAX_TEXT_FILE_SIZE_BYTES } from './fileHandlerUtils';
 import { getRelativePathFromAbsolute } from '../../utils/WorkspaceUtils';
 import { resolveTargetWorkspaceFolder } from '../FileHandlers';
-
-// ========== 打开独立编辑新窗口 ==========
-
-export const openFileEditorWindow: MessageHandler = async (data, requestId, ctx) => {
-  try {
-    const filePath = typeof data?.path === 'string' ? data.path : '';
-    if (!filePath.trim()) {
-      ctx.sendResponse(requestId, { success: false, error: t('webview.errors.invalidFileUri') });
-      return;
-    }
-    if (typeof ctx.openFileEditorWindow !== 'function') {
-      // VS Code 宿主：无独立窗口能力，静默成功（按钮在桌面版才显示，正常不会走到）
-      ctx.sendResponse(requestId, { success: false, error: 'Not supported on this host' });
-      return;
-    }
-    try {
-      ctx.openFileEditorWindow(filePath);
-    } catch (err) {
-      console.error('[FileEditorHandlers] openFileEditorWindow failed:', err);
-    }
-    ctx.sendResponse(requestId, { success: true, path: filePath });
-  } catch (error: any) {
-    ctx.sendResponse(requestId, {
-      success: false,
-      error: error.message || t('webview.errors.readFileFailed')
-    });
-  }
-};
 
 // ========== 保存文件编辑内容 ==========
 
@@ -127,6 +95,5 @@ export const saveFileEditorContent: MessageHandler = async (data, requestId, ctx
 // ========== 注册 ==========
 
 export function registerFileEditorHandlers(registry: Map<string, MessageHandler>): void {
-  registry.set(MESSAGE_NAMES['fileEditor.openWindow'], openFileEditorWindow);
   registry.set(MESSAGE_NAMES['fileEditor.saveFile'], saveFileEditorContent);
 }

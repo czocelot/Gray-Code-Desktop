@@ -498,10 +498,14 @@ export interface ConversationSessionSnapshot {
 export interface TabInfo {
   /** 标签页唯一 ID */
   id: string
-  /** 关联的对话 ID（null 表示新空白对话） */
+  /** 关联的对话 ID（null 表示新空白对话或文件编辑标签页） */
   conversationId: string | null
   /** 显示标题 */
   title: string
   /** 是否正在流式响应中 */
   isStreaming: boolean
+  /** 标签页类型：chat（默认，对话）/ file（文件编辑）；缺省视为 chat */
+  kind?: 'chat' | 'file'
+  /** kind === 'file' 时的文件路径（与 CodeView 的 path 同口径：相对/绝对/file:// URI） */
+  filePath?: string
 }

@@ -3042,7 +3042,7 @@ const zhCN = {
             open: '打开',
             recent: '最近打开...',
             refresh: '重新加载',
-            openInNewWindow: '打开为新页面（新窗口编辑）',
+            openInNewTab: '打开为新页签（编辑）',
             memorySource: '内存内容',
             jumpToLine: '跳转行号',
             issuesFound: '发现 {count} 个语法问题',

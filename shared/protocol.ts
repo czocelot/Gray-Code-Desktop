@@ -219,8 +219,7 @@ export const MESSAGE_NAMES = {
   readWorkspaceTextFile: 'readWorkspaceTextFile',
   refreshSkills: 'refreshSkills',
 
-// ---- 文件编辑新窗口（桌面版「打开为新页面」） ----
-  'fileEditor.openWindow': 'fileEditor.openWindow',
+// ---- 文件编辑标签页（桌面版「打开为新页面」） ----
   'fileEditor.saveFile': 'fileEditor.saveFile',
 
 // ---- 窗口 ----

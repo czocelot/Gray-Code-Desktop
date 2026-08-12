@@ -10,9 +10,9 @@ are tracked in the root `CHANGELOG.md`.
 
 ## [Unreleased]
 
-### Added：代码查看面板「打开为新页面」——独立窗口编辑文件（桌面版）
-  - 代码查看面板（CodeView）头部新增「打开为新页面」按钮（磁盘文件可用）：点击后在独立 BrowserWindow 中打开纯文本编辑器（FileEditorPage），可编辑工作区内文本文件并 Ctrl+S 保存；写文件复用工作区包含校验与 realpath 复核。
-  - 新窗口经 additionalArguments 注入 viewMode/filePath/clientId（preload 暴露 __GRAYCODE_VIEW_MODE / __GRAYCODE_FILE_PATH / __GRAYCODE_WEBVIEW_CLIENT_ID），响应按窗口独立 clientId 精确路由回对应窗口；同一文件重复点击聚焦已有窗口；安全基线复刻主窗口。
+### Added：代码查看面板「打开为新页面」——同级标签页编辑文件（桌面版）
+  - 代码查看面板（CodeView）头部新增「打开为新页面」按钮（磁盘文件可用）：点击后在**与对话同级的标签页栏**打开纯文本编辑器页签（与「新建标签页」同一层级，可拖拽排序/切换/关闭），编辑工作区内文本文件并 Ctrl+S 保存（fileEditor.saveFile 消息；写文件复用工作区包含校验与 realpath 复核）；同一文件重复打开直接切换已有页签；未保存更改关闭前确认（覆盖页签栏 × 与页内关闭按钮两条路径）。
+  - 废弃并移除独立的文件编辑 BrowserWindow 方案（fileEditor.openWindow / createFileEditorWindow / 窗口级 clientId 路由 / __GRAYCODE_FILE_PATH 注入）。
 
 ### Added：聊天消息字号调节（桌面版）
   - 设置 → 外观新增「用户消息字号 / AI 消息字号」滑块（8-32px，默认 13），仅作用于聊天区用户消息（含输入框）与 AI 消息（含思考块/流式输出），不改变 UI 其它部分字号；经 CSS 变量应用，三语 i18n。

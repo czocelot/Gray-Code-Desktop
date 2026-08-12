@@ -68,9 +68,6 @@ const { t, actualLanguage } = useI18n()
 // SubAgent Monitor 复用同一个前端入口，但不应初始化主聊天时间线。
 const isSubAgentMonitor = window.__GRAYCODE_VIEW_MODE === 'subagentMonitor'
 
-// 独立文件编辑新窗口（桌面版「打开为新页面」）：自包含轻量页面，不初始化主聊天时间线。
-const isFileEditor = window.__GRAYCODE_VIEW_MODE === 'fileEditor'
-
 // 语言是否已加载
 const languageLoaded = ref(false)
 // 扩展在生成 Webview HTML 时同步注入本次启动偏好；模块执行与 Vue 挂载无需等待 IPC。
@@ -319,6 +316,42 @@ function handleNewChat() {
 function handleNewTab() {
   chatStore.createNewTab()
   settingsStore.showChat()
+}
+
+// 当前激活的文件编辑标签页（kind='file'）：非 null 时聊天视图渲染文件编辑器而非对话内容
+const activeFileTab = computed(() => {
+  const tabs = chatStore.openTabs
+  const activeId = chatStore.activeTabId
+  const tab = tabs.find(t => t.id === activeId)
+  return tab && tab.kind === 'file' ? tab : null
+})
+
+// 文件编辑标签页的脏状态表（tabId → 是否有未保存更改）；关闭 tab 前据此确认
+const fileTabDirty = new Map<string, boolean>()
+
+// 文件编辑标签页上报脏状态变化（FileEditorPage @dirty-change）
+function handleFileTabDirty(dirty: boolean): void {
+  if (chatStore.activeTabId) {
+    fileTabDirty.set(chatStore.activeTabId, dirty)
+  }
+}
+
+// 关闭标签页：文件编辑标签页有未保存更改时先确认（覆盖 tab 栏 × 按钮路径）
+function handleCloseTab(tabId: string): void {
+  const tab = chatStore.openTabs.find(t => t.id === tabId)
+  if (tab?.kind === 'file' && fileTabDirty.get(tabId)) {
+    if (!window.confirm('有未保存的更改，确定关闭吗？')) return
+  }
+  chatStore.closeTab(tabId)
+  fileTabDirty.delete(tabId)
+}
+
+// 关闭当前文件编辑标签页（FileEditorPage 已确认未保存更改）
+function closeActiveFileTab(): void {
+  if (chatStore.activeTabId) {
+    fileTabDirty.delete(chatStore.activeTabId)
+    chatStore.closeTab(chatStore.activeTabId)
+  }
 }
 
 // 处理发送消息
@@ -800,12 +833,6 @@ onMounted(async () => {
     return
   }
 
-  if (isFileEditor) {
-    // 独立文件编辑窗口：FileEditorPage 完全自包含（读/写走 IPC 按窗口 clientId 路由），
-    // 不初始化主聊天时间线、不加载设置、不注册音频 hooks，避免触发无意义的后端初始化。
-    return
-  }
-
   // 初始化终端 store（监听终端输出事件）
   terminalStore.initialize()
 
@@ -996,7 +1023,6 @@ onBeforeUnmount(() => {
 
 <template>
   <SubAgentMonitor v-if="isSubAgentMonitor" />
-  <FileEditorPage v-else-if="isFileEditor" />
   <div v-else class="app-container">
     <!-- 桌面端自定义背景图（外观设置；透明度作用于图片层本身，内容层不受影响） -->
     <div
@@ -1021,13 +1047,21 @@ onBeforeUnmount(() => {
         :tabs="chatStore.openTabs"
         :active-tab-id="chatStore.activeTabId"
         @switch-tab="chatStore.switchTab"
-        @close-tab="chatStore.closeTab"
+        @close-tab="handleCloseTab"
         @new-tab="handleNewTab"
         @reorder-tab="chatStore.reorderTab"
       />
 
+      <!-- 文件编辑标签页（kind='file'，与对话标签页同级）：渲染文件编辑器 -->
+      <FileEditorPage
+        v-if="activeFileTab"
+        :file-path="activeFileTab.filePath"
+        @close="closeActiveFileTab"
+        @dirty-change="handleFileTabDirty"
+      />
+
       <!-- 主聊天区域：左侧聊天 + 右侧子代理 Monitor 内嵌面板 -->
-      <div class="chat-body">
+      <div v-else class="chat-body">
         <div class="chat-main">
           <!-- 初始状态：显示欢迎面板+历史对话列表 -->
           <WelcomePanel

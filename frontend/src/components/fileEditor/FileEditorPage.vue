@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
- * FileEditorPage.vue - 独立文件编辑窗口（桌面版「打开为新页面」）
+ * FileEditorPage.vue - 文件编辑标签页（桌面版「打开为新页面」）
  *
- * 由主进程创建独立 BrowserWindow 后，App.vue 按 __GRAYCODE_VIEW_MODE === 'fileEditor'
- * 渲染本页面。完全自包含：不初始化主聊天时间线，不依赖设置加载——
- * 读取/保存经 IPC（readFileForContext / fileEditor.saveFile）完成，
- * 响应按窗口自身 clientId（__GRAYCODE_WEBVIEW_CLIENT_ID）精确路由回本窗口。
+ * 与对话标签页同级的文件编辑器页签：由 chatStore.openFileTab 创建 kind='file'
+ * 标签页，App.vue 按当前激活标签页类型渲染本组件。读取经 readFileForContext、
+ * 保存经 fileEditor.saveFile（后端工作区包含校验 + realpath 复核），
+ * 消息走主窗口默认路由（无独立 clientId）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MESSAGE_NAMES } from '@shared/protocol'
 import { sendToExtension } from '@/utils/vscode'
 
-const filePath = ref(window.__GRAYCODE_FILE_PATH || '')
-const clientId = window.__GRAYCODE_WEBVIEW_CLIENT_ID
+const props = defineProps<{ filePath: string }>()
+const emit = defineEmits<{ close: []; 'dirty-change': [dirty: boolean] }>()
+
 const content = ref('')
 const originalContent = ref('')
 const loading = ref(true)
@@ -22,8 +23,10 @@ const saveMessage = ref('')
 const saveMessageType = ref<'success' | 'error'>('success')
 
 const dirty = computed(() => content.value !== originalContent.value)
+// 脏状态变化上报父组件（tab 栏关闭按钮的未保存确认依赖它）
+watch(dirty, (d) => emit('dirty-change', d))
 const fileName = computed(() => {
-  const p = filePath.value.replace(/\\/g, '/')
+  const p = props.filePath.replace(/\\/g, '/')
   return p.split('/').pop() || p
 })
 const lineCount = computed(() => (content.value ? content.value.split('\n').length : 0))
@@ -39,7 +42,7 @@ async function resolveFileUri(target: string): Promise<string> {
     return trimmed.startsWith('file://') ? trimmed : 'file://' + trimmed.replace(/^[/\\]+/, '')
   }
   try {
-    const wsUri = await sendToExtension<string | null>('getWorkspaceUri', {}, { clientId })
+    const wsUri = await sendToExtension<string | null>('getWorkspaceUri', {})
     if (wsUri) return `${wsUri}/${trimmed}`
   } catch {
     // 获取工作区失败：按原样解析，由后端校验兜底
@@ -51,13 +54,13 @@ async function loadFile(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const uri = await resolveFileUri(filePath.value)
+    const uri = await resolveFileUri(props.filePath)
     const response = await sendToExtension<{
       success: boolean
       content?: string
       path?: string
       error?: string
-    }>(MESSAGE_NAMES.readFileForContext, { uri }, { clientId })
+    }>(MESSAGE_NAMES.readFileForContext, { uri })
     if (!response?.success) {
       error.value = response?.error || T('读取文件失败', 'Failed to read file')
       return
@@ -80,7 +83,7 @@ async function saveFile(): Promise<void> {
       success: boolean
       path?: string
       error?: string
-    }>(MESSAGE_NAMES['fileEditor.saveFile'], { path: filePath.value, content: content.value }, { clientId })
+    }>(MESSAGE_NAMES['fileEditor.saveFile'], { path: props.filePath, content: content.value })
     if (!response?.success) {
       saveMessage.value = response?.error || T('保存失败', 'Save failed')
       saveMessageType.value = 'error'
@@ -100,11 +103,12 @@ async function saveFile(): Promise<void> {
   }
 }
 
-function closeWindow(): void {
+/** 关闭标签页：有未保存更改时先确认（由父组件调用 closeTab） */
+function closeTab(): void {
   if (dirty.value && !window.confirm(T('有未保存的更改，确定关闭吗？', 'You have unsaved changes. Close anyway?'))) {
     return
   }
-  window.close()
+  emit('close')
 }
 
 function handleKeydown(e: KeyboardEvent): void {
@@ -115,18 +119,19 @@ function handleKeydown(e: KeyboardEvent): void {
   }
 }
 
-onMounted(() => {
+// 文件路径变化（同一标签页复用）时重新加载
+watch(() => props.filePath, () => {
   void loadFile()
-})
+}, { immediate: true })
 </script>
 
 <template>
   <div class="file-editor-root">
     <header class="fe-header">
       <span class="codicon codicon-code fe-header-icon"></span>
-      <span class="fe-title" :title="filePath">{{ fileName }}</span>
+      <span class="fe-title" :title="props.filePath">{{ fileName }}</span>
       <span v-if="dirty" class="fe-dirty-dot" :title="T('有未保存的更改', 'Unsaved changes')">●</span>
-      <span class="fe-path" :title="filePath">{{ filePath }}</span>
+      <span class="fe-path" :title="props.filePath">{{ props.filePath }}</span>
 
       <div class="fe-actions">
         <button
@@ -138,13 +143,13 @@ onMounted(() => {
         >
           <i v-if="saving" class="codicon codicon-loading codicon-modifier-spin"></i>
           <i v-else class="codicon codicon-save"></i>
-          {{ T('保存', 'Save') }}
+ {{ T('保存', 'Save') }}
         </button>
         <button
           class="fe-btn"
           type="button"
-          :title="T('关闭', 'Close')"
-          @click="closeWindow"
+          :title="T('关闭标签页', 'Close tab')"
+          @click="closeTab"
         ><i class="codicon codicon-close"></i>
         </button>
       </div>
@@ -163,7 +168,7 @@ onMounted(() => {
       </div>
 
       <div v-else-if="error" class="fe-error">
-        <span class="codicon codicon-error"></span>
+     <span class="codicon codicon-error"></span>
         <span>{{ error }}</span>
       </div>
 
@@ -183,7 +188,7 @@ onMounted(() => {
 .file-editor-root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   background: var(--vscode-editor-background, #1e1e1e);
   color: var(--vscode-foreground, #cccccc);
   font-family: var(--vscode-font-family, sans-serif);

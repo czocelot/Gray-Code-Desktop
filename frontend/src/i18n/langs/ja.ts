@@ -3040,7 +3040,7 @@ const ja: LanguageMessages = {
             open: '開く',
             recent: '最近開いた...',
             refresh: '再読み込み',
-            openInNewWindow: '新しいウィンドウで開く（編集）',
+            openInNewTab: '新しいタブで開く（編集）',
             memorySource: 'メモリ内コンテンツ',
             jumpToLine: '行番号へ移動',
             issuesFound: '構文エラーを {count} 件検出',
