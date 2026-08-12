@@ -2965,6 +2965,7 @@ const en: LanguageMessages = {
             failed: sharedEn.components.backgroundTasks.failed,
             cancelled: 'Cancelled',
             cancel: 'Cancel task',
+            cancelling: 'Cancelling…',
             dismiss: 'Dismiss',
             dismissAllCompleted: 'Clear completed',
             dismissAllCompletedTitle: 'Dismiss all completed background tasks (confirmation shown when results are pending report)',

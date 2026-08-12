@@ -31,6 +31,8 @@
   - **编辑器背景半透明**：文件编辑器（含编辑区）背景接入全局半透明表面色（随「UI 不透明度」设置混合透明），文字/图标保持全不透明，可透出桌面背景图/窗口背景。
   - **修复关闭编辑页签后输入框不可用**：打开为新页面时未关闭代码查看抽屉（绝对定位覆盖层，z-index 130、宽可达 92%），切回对话页签后抽屉重新渲染遮挡聊天区（窄窗口下输入框无法点击）；现打开为新页面后自动关闭抽屉（codeViewStore.close）。
   - **修复未保存更改关闭确认后卡住**：关闭确认此前用 window.confirm（Electron 渲染进程同步阻塞、行为不可靠——sandbox + file:// 下点确定后可能返回异常/不释放，标签页无法关闭，界面表现为卡住；保存后 dirty=false 不弹确认故正常，与此现象吻合）；现页内关闭按钮与页签栏 × 两条路径均改用自研 ConfirmDialog（纯 DOM、Teleport、异步可靠，与 DirtyFilesConfirm 同款），i18n 三语新增 components.fileEditor.closeConfirm*。
+  - **修复保存后代码查看器显示旧内容**：保存落盘正常，但 CodeView 面板 v-show 保活导致 content 缓存不刷新，重新打开抽屉仍显示旧内容；现保存成功后**定向刷新**——仅当代码查看器正打开同一文件时调用 codeViewStore.refresh() 重新读取该文件（单文件、非全量重载，不影响其它面板与性能），未打开则无需处理（后续打开文件树重读即得新内容）。
+  - **修复后台任务取消「按不动」**：① 后端 TaskManager.cancelTask 增加强制终态兜底——abort 后若底层执行（未及时响应 abort 的长 LLM/命令调用）2s 内未走 unregisterTask 收敛，强制按 cancelled 注销并推送事件，任务条不再长期停在 running；② 前端取消按钮乐观反馈——点击即转圈（cancelling 态、防重复点击），取消失败（任务不存在等）回滚标记并 toast 提示；③ i18n 三语新增 components.backgroundTasks.cancelling。
   - **修复 UI 不透明度在编辑窗口（及暗色主题下全局）不生效**：color-mix 内的 var() 在 Chromium 按「定义点」解析（非惰性），:root 里定义的 --gc-surface-* 在 CSS 加载时锁定 --gc-ui-opacity=1，运行时调低不透明度不会重算表面色；现 App.vue 设置 --gc-ui-opacity 时同步用当前主题基础色显式重算 --gc-surface-*（内联覆盖），FileEditorPage 背景改为伪元素 + opacity: var(--gc-ui-opacity)（惰性解析实时跟随），文字/图标保持全不透明。
 
 ## [1.7.16] - 2026-08-12
@@ -3001,6 +3003,8 @@
   - 终端命令执行
   - 图像处理功能
   - 终端命令执行
+  - 图像处理功能
+  - 图像处理功能
   - 图像处理功能
   - 图像处理功能
   - 图像处理功能

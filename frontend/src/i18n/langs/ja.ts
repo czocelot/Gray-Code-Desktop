@@ -2965,6 +2965,7 @@ const ja: LanguageMessages = {
             failed: sharedJa.components.backgroundTasks.failed,
             cancelled: 'キャンセル済み',
             cancel: 'タスクをキャンセル',
+            cancelling: 'キャンセル中…',
             dismiss: '削除',
             dismissAllCompleted: '完了済みを一括クリア',
             dismissAllCompletedTitle: '完了済みのバックグラウンドタスクを一括クリア（未報告の結果がある場合は確認ダイアログを表示）',

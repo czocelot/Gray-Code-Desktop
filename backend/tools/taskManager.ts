@@ -220,6 +220,18 @@ class TaskManagerClass {
             // 终态（cancelled 事件带完整输出）由各任务完成路径的 unregisterTask 统一发出；
             // 提前删除会让 unregisterTask 变成 no-op，终态事件丢失，前端任务条卡在「已取消但无结果」。
             task.abortController.abort();
+            // 取消兜底：abort 后若底层执行（未及时响应 abort 的长 LLM/命令调用等）在超时
+            // 窗口内未走 unregisterTask 收敛终态，强制按 cancelled 终态注销并推送事件，保证
+            // 前端任务条立即反映取消结果；后续 unregisterTask 对已清理 ID 是安全 no-op（幂等）。
+            const FORCE_CANCEL_TIMEOUT_MS = 2000;
+            const fallbackTimer = setTimeout(() => {
+                if (this.activeTasks.has(id)) {
+                    this.unregisterTask(id, 'cancelled', { note: 'force-cancelled (task did not settle after abort)' });
+                }
+            }, FORCE_CANCEL_TIMEOUT_MS);
+            if (typeof (fallbackTimer as unknown as { unref?: () => void }).unref === 'function') {
+                (fallbackTimer as unknown as { unref: () => void }).unref();
+            }
             return { success: true };
         } catch (error) {
             return {

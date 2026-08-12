@@ -38,6 +38,8 @@ export interface BackgroundTaskRecord {
   subagentRunId?: string
   /** 回执是否已发送给主模型 */
   reported: boolean
+  /** 取消请求已发出、等待终态（前端本地乐观标记） */
+  cancelling?: boolean
 }
 
 /**

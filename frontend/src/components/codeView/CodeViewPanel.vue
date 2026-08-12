@@ -59,7 +59,9 @@ function onOpenFile(node: CodeTreeNode) {
   codeViewStore.openTreeFile(node)
 }
 
-// 面板每次变为可见时自动加载工作区并列出根目录
+// 面板每次变为可见时自动加载工作区并列出根目录。
+// 注意：不在此处重新读取当前文件——保存后的定向刷新由 FileEditorPage 保存成功时
+// 通知 codeViewStore.refresh() 完成（只刷新变更文件），避免每次打开面板全量重载。
 watch(() => props.visible, (visible) => {
   if (visible) void codeViewStore.initWorkspace()
 })

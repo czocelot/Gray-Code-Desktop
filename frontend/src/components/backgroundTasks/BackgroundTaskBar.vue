@@ -154,10 +154,11 @@ async function openDetails(task: BackgroundTaskRecord): Promise<void> {
         <button
           v-if="task.status === 'running'"
           class="chip-btn"
-          :title="t('components.backgroundTasks.cancel')"
+          :disabled="task.cancelling"
+          :title="task.cancelling ? t('components.backgroundTasks.cancelling') : t('components.backgroundTasks.cancel')"
           @click.stop="store.cancelTask(task.taskId)"
         >
-          <i class="codicon codicon-stop-circle"></i>
+          <i class="codicon" :class="task.cancelling ? 'codicon-loading codicon-modifier-spin' : 'codicon-stop-circle'"></i>
         </button>
         <button
           v-else

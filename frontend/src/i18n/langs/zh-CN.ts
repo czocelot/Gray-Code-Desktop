@@ -2967,6 +2967,7 @@ const zhCN = {
             failed: sharedZhCN.components.backgroundTasks.failed,
             cancelled: '已取消',
             cancel: '取消任务',
+            cancelling: '取消中…',
             dismiss: '清除',
             dismissAllCompleted: '清除已完成',
             dismissAllCompletedTitle: '一键清除所有已完成的后台任务（未汇报结果的任务会弹出确认）',

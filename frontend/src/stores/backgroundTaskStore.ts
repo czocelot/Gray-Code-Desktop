@@ -13,7 +13,7 @@
 import { MESSAGE_NAMES } from '@shared/protocol'
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { sendToExtension, onExtensionCommand } from '../utils/vscode'
+import { sendToExtension, onExtensionCommand, showNotification } from '../utils/vscode'
 import {
   isBackgroundStartEvent,
   taskRecordFromStartEvent,
@@ -387,10 +387,33 @@ export const useBackgroundTaskStore = defineStore('backgroundTasks', () => {
 
   /** 取消运行中的后台任务 */
   async function cancelTask(taskId: string): Promise<void> {
+    // 乐观标记「取消中」：立即给按钮 loading 反馈；cancelled 事件到达后转终态
+    const record = tasks.value[taskId]
+    if (record && record.status === 'running') {
+      tasks.value = { ...tasks.value, [taskId]: { ...record, cancelling: true } }
+    }
+    let failed = false
     try {
-      await sendToExtension(MESSAGE_NAMES['task.cancel'], { taskId })
+      const result = await sendToExtension<{ success?: boolean; error?: string }>(
+        MESSAGE_NAMES['task.cancel'],
+        { taskId }
+      )
+      if (!result?.success) {
+        failed = true
+        console.error('Failed to cancel background task:', result?.error)
+        await showNotification(result?.error || 'Failed to cancel task', 'warning')
+      }
     } catch (error) {
+      failed = true
       console.error('Failed to cancel background task:', error)
+      await showNotification(error instanceof Error ? error.message : 'Failed to cancel task', 'warning')
+    }
+    // 取消请求失败/任务不存在：回滚乐观标记（任务仍 running 时可再次点击）
+    if (failed) {
+      const cur = tasks.value[taskId]
+      if (cur && cur.status === 'running') {
+        tasks.value = { ...tasks.value, [taskId]: { ...cur, cancelling: false } }
+      }
     }
   }
 

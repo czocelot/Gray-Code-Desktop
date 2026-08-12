@@ -10,6 +10,7 @@
 import { computed, ref, watch } from 'vue'
 import { MESSAGE_NAMES } from '@shared/protocol'
 import { sendToExtension } from '@/utils/vscode'
+import { useCodeViewStore } from '@/stores/codeViewStore'
 import { ConfirmDialog } from '../common'
 
 const props = defineProps<{ filePath: string }>()
@@ -93,6 +94,15 @@ async function saveFile(): Promise<void> {
     originalContent.value = content.value
     saveMessage.value = T('已保存', 'Saved')
     saveMessageType.value = 'success'
+    // 保存成功：若代码查看器正打开同一文件，立即刷新其显示（磁盘内容已更新）
+    try {
+      const codeViewStore = useCodeViewStore()
+      if (codeViewStore.source === 'disk' && codeViewStore.path === props.filePath) {
+        void codeViewStore.refresh()
+      }
+    } catch {
+      // 刷新失败不影响保存结果
+    }
     setTimeout(() => {
       if (saveMessage.value === T('已保存', 'Saved')) saveMessage.value = ''
     }, 2000)
