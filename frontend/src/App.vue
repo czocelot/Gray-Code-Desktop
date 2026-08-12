@@ -699,16 +699,58 @@ watch(
     if (!isElectronHost) return
     applyDesktopTheme(theme)
     watchDesktopThemeMedia(theme)
+    // 主题切换后 --vscode-* 基础色变化：用当前主题色重算表面色变量（见 refreshSurfaceVars）
+    refreshSurfaceVars(normalizeUiOpacity(settingsStore.uiOpacity))
   },
   { immediate: true }
 )
+
+/** 归一化 UI 不透明度（0-100 → 0-1，非法值回退 1） */
+function normalizeUiOpacity(opacity: unknown): number {
+  return typeof opacity === 'number' && Number.isFinite(opacity)
+    ? Math.min(100, Math.max(0, opacity)) / 100
+    : 1
+}
+
+/**
+ * 表面色变量（--gc-surface-*）重算：
+ * color-mix 内的 var() 在 Chromium 按「定义点」解析（非惰性，见 theme.css 注释）——
+ * :root 里的定义在 CSS 加载时把 --gc-ui-opacity 锁定为 fallback 1（完全不透明），
+ * 之后运行时更新 --gc-ui-opacity 不会让 surface 变量重算（暗色主题下 UI 不透明度整体失效）。
+ * 这里在设置 --gc-ui-opacity 时同步用当前生效的主题基础色（getComputedStyle）显式重算
+ * surface 变量并内联覆盖 :root 定义，保证半透明实时生效且亮/暗主题取到正确基础色。
+ */
+function refreshSurfaceVars(normalized: number): void {
+  const style = document.documentElement.style
+  const pct = Math.round(normalized * 1000) / 10
+  const cs = window.getComputedStyle(document.body)
+  const color = (name: string, fallback: string): string =>
+    cs.getPropertyValue(name).trim() || fallback
+  style.setProperty(
+    '--gc-surface-editor-bg',
+    `color-mix(in srgb, ${color('--vscode-editor-background', '#1e1e1e')} ${pct}%, transparent)`
+  )
+  style.setProperty(
+    '--gc-surface-input-bg',
+    `color-mix(in srgb, ${color('--vscode-input-background', '#3c3c3c')} ${pct}%, transparent)`
+  )
+  style.setProperty(
+    '--gc-surface-sidebar-bg',
+    `color-mix(in srgb, ${color('--vscode-sideBar-background', '#252526')} ${pct}%, transparent)`
+  )
+  style.setProperty(
+    '--gc-surface-dropdown-bg',
+    `color-mix(in srgb, ${color('--vscode-dropdown-background', '#3c3c3c')} ${pct}%, transparent)`
+  )
+}
+
 watch(
   () => settingsStore.uiOpacity,
   (opacity) => {
-    const normalized = typeof opacity === 'number' && Number.isFinite(opacity)
-      ? Math.min(100, Math.max(0, opacity)) / 100
-      : 1
+    const normalized = normalizeUiOpacity(opacity)
     document.documentElement.style.setProperty('--gc-ui-opacity', String(normalized))
+    // 同步重算表面色变量：绕开 color-mix 定义点锁定，确保半透明实时生效
+    refreshSurfaceVars(normalized)
   },
   { immediate: true }
 )

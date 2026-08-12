@@ -189,11 +189,26 @@ watch(() => props.filePath, () => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  /* 半透明表面色：随「UI 不透明度」设置（--gc-ui-opacity）color-mix 混合透明，
-     文字/图标保持全不透明；编辑器区背景可透出桌面背景图/窗口背景 */
-  background: var(--gc-surface-editor-bg, var(--vscode-editor-background, #1e1e1e));
+  /* 半透明背景由 ::before 伪元素承担（background: transparent + 伪元素 opacity）：
+     color-mix 在 Chromium 按定义点解析（:root 加载时锁定 --gc-ui-opacity=1），
+     直接 background: var(--gc-surface-editor-bg) 无法实时跟随 UI 不透明度；
+     opacity: var(--gc-ui-opacity) 惰性解析、实时生效，透出桌面背景图/窗口背景 */
+  position: relative;
+  isolation: isolate;
+  background: transparent;
   color: var(--vscode-foreground, #cccccc);
   font-family: var(--vscode-font-family, sans-serif);
+}
+
+/* 半透明背景层：z-index:-1 保持在内容之下（isolation 上下文内），文字/图标全不透明 */
+.file-editor-root::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--vscode-editor-background, #1e1e1e);
+  opacity: calc(var(--gc-ui-opacity, 1));
+  pointer-events: none;
 }
 
 .fe-header {
@@ -336,7 +351,8 @@ watch(() => props.filePath, () => {
   border: none;
   outline: none;
   padding: 12px 16px;
-  background: var(--gc-surface-editor-bg, var(--vscode-editor-background, #1e1e1e));
+  /* 透明：透出 .file-editor-root::before 半透明背景层（跟随 UI 不透明度） */
+  background: transparent;
   color: var(--vscode-editor-foreground, #cccccc);
   font-family: var(--vscode-editor-font-family, Consolas, 'Courier New', monospace);
   font-size: var(--vscode-editor-font-size, 13px);
