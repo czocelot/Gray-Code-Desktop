@@ -1996,15 +1996,3 @@ onMounted(() => {
   }
 }
 </style>
-@keyframes settings-search-flash {
-  0% {
-    background-color: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
-  }
-  60% {
-    background-color: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
-  }
-  100% {
-    background-color: transparent;
-  }
-}
-</style>
