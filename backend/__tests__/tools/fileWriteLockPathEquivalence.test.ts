@@ -6,6 +6,8 @@
  * 否则可绕过互斥锁导致并行覆盖。
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
@@ -195,5 +197,87 @@ describe('锁 key 路径等价 - 多工作区', () => {
     test('未加前缀的相对路径回退后同一写法仍互斥', () => {
         expect(manager.tryAcquire(['src/a.ts'], holderA).acquired).toBe(true);
         expect(manager.tryAcquire(['./src/a.ts'], holderB).acquired).toBe(false);
+    });
+});
+
+describe('锁 key 路径等价 - symlink/junction', () => {
+    let tempRoot: string;
+    let parentDir: string;
+    let targetA: string;
+    let targetB: string;
+    let linkDir: string;
+    let manager: FileWriteLockManager;
+
+    const createDirectoryLink = (target: string, link: string) => {
+        fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    };
+    const itWithFileSymlink = process.platform === 'win32' ? test.skip : test;
+
+    const removeDirectoryLink = (link: string) => {
+        try {
+            fs.unlinkSync(link);
+        } catch {
+            fs.rmdirSync(link);
+        }
+    };
+
+    beforeEach(() => {
+        tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-lock-symlink-'));
+        parentDir = path.join(tempRoot, 'parent');
+        targetA = path.join(tempRoot, 'target-a');
+        targetB = path.join(tempRoot, 'target-b');
+        linkDir = path.join(parentDir, 'link');
+        fs.mkdirSync(parentDir);
+        fs.mkdirSync(targetA);
+        fs.mkdirSync(targetB);
+        createDirectoryLink(targetA, linkDir);
+        manager = new FileWriteLockManager();
+        (vscode.workspace as any).workspaceFolders = [];
+    });
+
+    afterEach(() => {
+        (vscode.workspace as any).workspaceFolders = [];
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    test('链接路径与真实路径指向已存在文件时互斥', () => {
+        const realFile = path.join(targetA, 'shared.ts');
+        fs.writeFileSync(realFile, 'x');
+        expect(manager.tryAcquire([path.join(linkDir, 'shared.ts')], holderA).acquired).toBe(true);
+        expect(manager.tryAcquire([realFile], holderB).acquired).toBe(false);
+    });
+
+    test('链接路径与真实路径指向待创建文件时互斥', () => {
+        expect(manager.tryAcquire([path.join(linkDir, 'new.ts')], holderA).acquired).toBe(true);
+        expect(manager.tryAcquire([path.join(targetA, 'new.ts')], holderB).acquired).toBe(false);
+    });
+
+    itWithFileSymlink('最终路径是 dangling symlink 时仍与待创建目标互斥', () => {
+        const targetFile = path.join(targetA, 'dangling-target.ts');
+        const danglingLink = path.join(parentDir, 'dangling-link.ts');
+        fs.symlinkSync(targetFile, danglingLink, 'file');
+
+        expect(manager.tryAcquire([danglingLink], holderA).acquired).toBe(true);
+        expect(manager.tryAcquire([targetFile], holderB).acquired).toBe(false);
+    });
+
+    test('父目录锁仍阻止经指向目录外的链接写入后代', () => {
+        expect(manager.tryAcquire([parentDir], holderA).acquired).toBe(true);
+        expect(manager.tryAcquire([path.join(linkDir, 'new.ts')], holderB).acquired).toBe(false);
+    });
+
+    test('链接改指后同 holder 重入可逐次释放全部旧物理 key', () => {
+        const displayPath = path.join(linkDir, 'same.ts');
+        expect(manager.tryAcquire([displayPath], holderA).acquired).toBe(true);
+
+        removeDirectoryLink(linkDir);
+        createDirectoryLink(targetB, linkDir);
+        expect(manager.tryAcquire([displayPath], holderA).acquired).toBe(true);
+
+        manager.release([displayPath], holderA);
+        manager.release([displayPath], holderA);
+
+        expect(manager.getLockCount()).toBe(0);
+        expect(manager.tryAcquire([path.join(targetA, 'same.ts')], holderB).acquired).toBe(true);
     });
 });

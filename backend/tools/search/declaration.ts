@@ -7,6 +7,7 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolResult } from '../types';
+import { parseArgs } from '../types';
 import {
     getAllWorkspaces,
     getWorkspaceByUri,
@@ -36,6 +37,8 @@ import type {
 } from './searchPass';
 import { searchAndReplaceInDirectory, MAX_REPLACE_MATCHES } from './replacePass';
 import type { ReplaceResult, SkippedFileInfo } from './replacePass';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
 
 /**
  * 工作区外访问策略自检（H3）。
@@ -68,6 +71,21 @@ function getSearchRootAccessError(
  */
 class OutsideWorkspaceAccessError extends Error {}
 
+/**
+ * search_in_files 的规范化参数形状。
+ */
+interface SearchInFilesArgs {
+    mode?: 'search' | 'replace';
+    query?: string;
+    path?: string;
+    pattern?: string;
+    isRegex?: boolean;
+    caseSensitive?: boolean;
+    maxResults?: number;
+    replace?: string;
+    maxFiles?: number;
+}
+
 function createPossibleMultiplePathsWarning(searchPath: string): SearchPathWarningInfo | undefined {
     const normalized = (searchPath || '').trim();
     if (!normalized || normalized === '.') {
@@ -99,10 +117,16 @@ export function createSearchInFilesTool(): Tool {
     // 获取工作区信息用于描述
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
     
-    let pathDescription = 'Search path relative to workspace root. Use "dir/" (trailing slash) for directories, or "dir/file.ext" for a single file. Default "." searches the entire workspace.';
+    let pathDescription = isZh
+        ? '相对于工作区根目录的搜索路径。目录使用 "dir/"（尾部斜杠），单个文件使用 "dir/file.ext"。默认 "." 搜索整个工作区。'
+        : 'Search path relative to workspace root. Use "dir/" (trailing slash) for directories, or "dir/file.ext" for a single file. Default "." searches the entire workspace.';
     if (isMultiRoot) {
-        pathDescription = `Search path, use "workspace_name/path" format. Use "workspace_name/dir/" (trailing slash) for directories, or "workspace_name/file.ext" for a single file. Use "." to search all workspaces. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
+        pathDescription = isZh
+            ? `搜索路径，使用 "workspace_name/path" 格式。目录使用 "workspace_name/dir/"（尾部斜杠），单个文件使用 "workspace_name/file.ext"。使用 "." 搜索所有工作区。可用工作区：${workspaces.map(w => w.name).join(', ')}`
+            : `Search path, use "workspace_name/path" format. Use "workspace_name/dir/" (trailing slash) for directories, or "workspace_name/file.ext" for a single file. Use "." to search all workspaces. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
     }
     
     return {
@@ -110,8 +134,12 @@ export function createSearchInFilesTool(): Tool {
             name: 'search_in_files',
             strict: true,  // API 端强制 schema 校验
             description: isMultiRoot
-                ? `Search or search-and-replace content in multiple workspace files. Supports regular expressions. Use "workspace_name/dir/" (trailing slash) for directories, or "workspace_name/file.ext" for a single file. Use "." to search all workspaces. Available workspaces: ${workspaces.map(w => w.name).join(', ')}.`
-                : 'Search or search-and-replace content in workspace files. Supports regular expressions. Use "dir/" (trailing slash) for directories, or "dir/file.ext" for a single file. Returns matching files and context.',
+                ? isZh
+                    ? `在工作区多个文件中搜索或搜索并替换内容。支持正则表达式。目录使用 "workspace_name/dir/"（尾部斜杠），单个文件使用 "workspace_name/file.ext"。使用 "." 搜索所有工作区。可用工作区：${workspaces.map(w => w.name).join(', ')}。`
+                    : `Search or search-and-replace content in multiple workspace files. Supports regular expressions. Use "workspace_name/dir/" (trailing slash) for directories, or "workspace_name/file.ext" for a single file. Use "." to search all workspaces. Available workspaces: ${workspaces.map(w => w.name).join(', ')}.`
+                : isZh
+                    ? '在工作区文件中搜索或搜索并替换内容。支持正则表达式。目录使用 "dir/"（尾部斜杠），单个文件使用 "dir/file.ext"。返回匹配的文件和上下文。'
+                    : 'Search or search-and-replace content in workspace files. Supports regular expressions. Use "dir/" (trailing slash) for directories, or "dir/file.ext" for a single file. Returns matching files and context.',
             category: 'search',
             parameters: {
                 type: 'object',
@@ -119,12 +147,16 @@ export function createSearchInFilesTool(): Tool {
                     mode: {
                         type: 'string',
                         enum: ['search', 'replace'],
-                        description: 'Operation mode. Use "search" for finding content only, use "replace" for search and replace.',
+                        description: isZh
+                            ? '操作模式。使用 "search" 仅查找内容，使用 "replace" 执行查找并替换。'
+                            : 'Operation mode. Use "search" for finding content only, use "replace" for search and replace.',
                         default: 'search'
                     },
                     query: {
                         type: 'string',
-                        description: 'Search keyword, exact phrase, space-separated keywords, or regular expression. If query contains regex syntax such as "|", ".*", ".+", "\\.", "\\d", "[]", "()", "^", or "$", set isRegex=true. Search mode first tries the full literal phrase and may retry space-separated keywords when isRegex=false.'
+                        description: isZh
+                            ? '搜索关键词、精确短语、空格分隔的关键词或正则表达式。如果查询包含正则语法（如 "|"、".*"、".+"、"\\."、"\\d"、"[]"、"()"、"^" 或 "$"），请设置 isRegex=true。搜索模式先尝试完整字面短语；isRegex=false 时可能改用空格分隔的关键词重试。'
+                            : 'Search keyword, exact phrase, space-separated keywords, or regular expression. If query contains regex syntax such as "|", ".*", ".+", "\\.", "\\d", "[]", "()", "^", or "$", set isRegex=true. Search mode first tries the full literal phrase and may retry space-separated keywords when isRegex=false.'
                     },
                     path: {
                         type: 'string',
@@ -133,30 +165,38 @@ export function createSearchInFilesTool(): Tool {
                     },
                     pattern: {
                         type: 'string',
-                        description: 'File matching pattern, e.g., "*.ts" or "**/*.js"',
+                        description: isZh
+                            ? '文件匹配模式，例如："*.ts" 或 "**/*.js"'
+                            : 'File matching pattern, e.g., "*.ts" or "**/*.js"',
                         default: '**/*'
                     },
                     isRegex: {
                         type: 'boolean',
-                        description: 'Whether to treat query as a regular expression. Default: false. When false, regex-looking characters are searched literally; zero-result searches may return suspected_regex diagnostics instead of silently changing semantics.',
+                        description: isZh
+                            ? '是否将 query 视为正则表达式。默认：false。为 false 时，正则样式的字符按字面量搜索；零结果搜索可能返回 suspected_regex 诊断，而不是静默改变语义。'
+                            : 'Whether to treat query as a regular expression. Default: false. When false, regex-looking characters are searched literally; zero-result searches may return suspected_regex diagnostics instead of silently changing semantics.',
                         default: false
                     },
                     caseSensitive: {
                         type: 'boolean',
-                        description: 'Whether matching is case-sensitive. Defaults differ by mode: search mode defaults to false (case-insensitive), replace mode defaults to true (conservative exact replacement). Pass explicitly to override, e.g. set caseSensitive=false in replace mode to replace matches found by a case-insensitive search.'
+                        description: isZh
+                            ? '匹配是否区分大小写。默认值因模式而异：search 模式默认不区分（便于定位），replace 模式默认区分（保守替换）。可显式覆盖，例如在 replace 模式下设置 caseSensitive=false 以替换不区分大小写搜索到的匹配。'
+                            : 'Whether matching is case-sensitive. Defaults differ by mode: search mode defaults to false (case-insensitive), replace mode defaults to true (conservative exact replacement). Pass explicitly to override, e.g. set caseSensitive=false in replace mode to replace matches found by a case-insensitive search.'
                     },
                     maxResults: {
                         type: 'number',
-                        description: '[Search mode] Maximum number of match results',
+                        description: isZh ? '[搜索模式] 最大匹配结果数' : '[Search mode] Maximum number of match results',
                         default: 100
                     },
                     replace: {
                         type: 'string',
-                        description: '[Replace mode] Replacement string. REQUIRED when mode is "replace"; omitting it would silently replace all matches with empty string. Supports regex capture groups like $1, $2 when isRegex is true.'
+                        description: isZh
+                            ? '[替换模式] 替换字符串。mode 为 "replace" 时必须提供；省略会静默把所有匹配替换为空字符串。isRegex=true 时支持 $1、$2 等捕获组。'
+                            : '[Replace mode] Replacement string. REQUIRED when mode is "replace"; omitting it would silently replace all matches with empty string. Supports regex capture groups like $1, $2 when isRegex is true.'
                     },
                     maxFiles: {
                         type: 'number',
-                        description: '[Replace mode] Maximum number of files to process',
+                        description: isZh ? '[替换模式] 最多处理的文件数' : '[Replace mode] Maximum number of files to process',
                         default: 50
                     }
                 },
@@ -164,17 +204,18 @@ export function createSearchInFilesTool(): Tool {
             }
         },
         handler: async (args, context?: import('../types').ToolContext): Promise<ToolResult> => {
-            const query = args.query as string;
-            const searchPath = (args.path as string) || '.';
-            const filePattern = (args.pattern as string) || '**/*';
-            const isRegex = (args.isRegex as boolean) || false;
+            const typed = parseArgs<SearchInFilesArgs>(args);
+            const query = typed.query as string;
+            const searchPath = typed.path || '.';
+            const filePattern = typed.pattern || '**/*';
+            const isRegex = typed.isRegex || false;
             
             // 严格按照 mode 字段决定模式，忽略其他不相关的参数
-            const mode = (args.mode as string) || 'search';
+            const mode = typed.mode || 'search';
             const isReplaceMode = mode === 'replace';
 
             // replace 模式下 replace 参数必须显式提供：漏传时替换串为空会静默删除所有匹配内容
-            if (isReplaceMode && typeof args.replace !== 'string') {
+            if (isReplaceMode && typeof typed.replace !== 'string') {
                 return {
                     success: false,
                     error: 'replace parameter is required when mode is "replace"'
@@ -184,23 +225,23 @@ export function createSearchInFilesTool(): Tool {
             // 大小写语义：search 默认不区分（方便定位），replace 默认区分（保守替换）。
             // 支持显式覆盖，并在 0 命中时通过诊断信息提醒模型两种模式的默认差异，
             // 避免“search 搜得到、replace 替不了”的困惑。
-            const caseSensitive = typeof args.caseSensitive === 'boolean'
-                ? (args.caseSensitive as boolean)
+            const caseSensitive = typeof typed.caseSensitive === 'boolean'
+                ? typed.caseSensitive
                 : isReplaceMode;
             
             // 搜索模式参数（0/负值/非数字语义混乱：统一回退默认 100 并取整，参照 find_files）
-            const maxResults = typeof args.maxResults === 'number' && args.maxResults > 0 ? Math.floor(args.maxResults) : 100;
+            const maxResults = typeof typed.maxResults === 'number' && typed.maxResults > 0 ? Math.floor(typed.maxResults) : 100;
             
             // 替换模式参数（仅在替换模式下使用）。
             // isRegex=false 时 query 按字面量匹配，替换串也必须按字面量写入：
             // 转义 $ 序列，防止 $&/$1/$$ 被 String.replace 解释为特殊替换模式
             //（工具描述承诺捕获组仅在 isRegex=true 时生效）。
-            const rawReplacement = isReplaceMode ? ((args.replace as string) ?? '') : '';
+            const rawReplacement = isReplaceMode ? (typed.replace ?? '') : '';
             const replacement = isReplaceMode && !isRegex
                 ? rawReplacement.replace(/\$/g, '$$$$')
                 : rawReplacement;
-            const maxFiles = isReplaceMode && typeof args.maxFiles === 'number' && args.maxFiles > 0
-                ? Math.floor(args.maxFiles)
+            const maxFiles = isReplaceMode && typeof typed.maxFiles === 'number' && typed.maxFiles > 0
+                ? Math.floor(typed.maxFiles)
                 : 50;
 
             if (!query) {
@@ -415,17 +456,21 @@ export function createSearchInFilesTool(): Tool {
                     
                     const runSearchPass = async (regex: RegExp): Promise<SearchPassResult> => {
                         const results: SearchMatch[] = [];
+                        const skippedFiles: SkippedFileInfo[] = [];
+                        let filesTruncated = false;
+                        let statPathWarning: SearchPathWarningInfo | undefined;
                         // maxResults+1 探测语义（参照 find_files）：多取 1 条用于精确判定截断，
                         // 恰好等于 maxResults 条时不误报 truncated；超出部分在返回前裁剪。
                         const probeLimit = maxResults + 1;
 
                         if (isExplicit && targetWorkspace) {
                             // 显式指定了工作区，只搜索该工作区
-                            const { searchRoot, effectivePattern } = await getSearchRootAndPattern(
+                            const { searchRoot, effectivePattern, pathWarning } = await getSearchRootAndPattern(
                                 targetWorkspace.uri,
                                 relativePath,
                                 filePattern
                             );
+                            if (pathWarning) statPathWarning = pathWarning;
                             const accessError = getSearchRootAccessError(searchRoot, args, context);
                             if (accessError) {
                                 throw new OutsideWorkspaceAccessError(accessError);
@@ -440,7 +485,9 @@ export function createSearchInFilesTool(): Tool {
                                 searchConfig,
                                 budget
                             );
-                            results.push(...pass);
+                            results.push(...pass.matches);
+                            filesTruncated = pass.filesTruncated;
+                            skippedFiles.push(...pass.skippedFiles);
                         } else if (searchPath === '.' && workspaces.length > 1) {
                             // 搜索所有工作区（会话绑定工作区时仅搜索该工作区）
                             for (const ws of searchWorkspaces) {
@@ -458,16 +505,19 @@ export function createSearchInFilesTool(): Tool {
                                     searchConfig,
                                     budget
                                 );
-                                results.push(...wsPass);
+                                results.push(...wsPass.matches);
+                                filesTruncated = filesTruncated || wsPass.filesTruncated;
+                                skippedFiles.push(...wsPass.skippedFiles);
                             }
                         } else {
                             // 单工作区或未指定，使用默认
                             const root = targetWorkspace?.uri || workspaces[0].uri;
-                            const { searchRoot, effectivePattern } = await getSearchRootAndPattern(
+                            const { searchRoot, effectivePattern, pathWarning } = await getSearchRootAndPattern(
                                 root,
                                 relativePath,
                                 filePattern
                             );
+                            if (pathWarning) statPathWarning = pathWarning;
                             const accessError = getSearchRootAccessError(searchRoot, args, context);
                             if (accessError) {
                                 throw new OutsideWorkspaceAccessError(accessError);
@@ -482,7 +532,9 @@ export function createSearchInFilesTool(): Tool {
                                 searchConfig,
                                 budget
                             );
-                            results.push(...pass);
+                            results.push(...pass.matches);
+                            filesTruncated = filesTruncated || pass.filesTruncated;
+                            skippedFiles.push(...pass.skippedFiles);
                         }
 
                         // 探测多取 1 条：只有真的超出 maxResults 才算截断；恰好等于时裁剪后不报 truncated
@@ -494,7 +546,10 @@ export function createSearchInFilesTool(): Tool {
                         return {
                             results,
                             matchesTruncated,
-                            budgetTruncated: !!budget?.truncated
+                            budgetTruncated: !!budget?.truncated,
+                            filesTruncated,
+                            skippedFiles,
+                            pathWarning: statPathWarning
                         };
                     };
 
@@ -540,7 +595,13 @@ export function createSearchInFilesTool(): Tool {
                             truncated: searchPass.matchesTruncated || searchPass.budgetTruncated,
                             multiRoot: workspaces.length > 1,
                             queryFallback: fallbackInfo,
-                            pathWarning: allResults.length === 0 ? pathWarning : undefined
+                            // 处理失败/被护栏跳过的文件及原因：与 replace 模式的 skippedFiles 同构，
+                            // 让模型能区分「真没有匹配」与「N 个文件因权限/IO/大小被跳过」
+                            skippedFiles: searchPass.skippedFiles.length > 0 ? searchPass.skippedFiles : undefined,
+                            // 0 命中时优先展示 possible_multiple_paths 诊断，其次展示 stat 失败降级说明
+                            pathWarning: allResults.length === 0
+                                ? (pathWarning ?? searchPass.pathWarning)
+                                : undefined
                         }
                     };
                 }

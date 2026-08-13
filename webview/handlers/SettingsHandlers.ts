@@ -15,20 +15,11 @@ import { getGlobalMemoryManager, getMemoryManagerForWorkspace, listWorkspaceMemo
 import { getProductMetadata } from '../../backend/core/productMetadata';
 import { getExtensionVersion } from '../utils/extensionInfo';
 import { SAVED_WORKSPACES_KEY } from './WorkspaceHandlers';
+import { withBoundary } from './errorBoundary';
 
 /** 批量删除的 ids 数量上限：防御超大数组触发 O(n·T) 全量 LOG 重建 */
 const MAX_BATCH_DELETE_IDS = 10000;
 const MAX_MEMORY_ENTRIES_LIMIT = 10000;
-
-function settingsHandlerBoundary(errorCode: string, fallback: string, handler: MessageHandler): MessageHandler {
-  return async (data, requestId, ctx) => {
-    try {
-      await handler(data || {}, requestId, ctx);
-    } catch (error) {
-      ctx.sendError(requestId, errorCode, error instanceof Error && error.message ? error.message : fallback);
-    }
-  };
-}
 
 /**
  * 记忆 handler 解析目标 MemoryManager：
@@ -65,6 +56,9 @@ export const getAppInfo: MessageHandler = async (_data, requestId, ctx) => {
 
 /**
  * 更新设置
+ *
+ * 04#6：payload 形状（{ settings: object }）已由 MessageRouter 入口按 MESSAGE_SCHEMAS 校验，
+ * 此处保持原样透传后端。
  */
 export const updateSettings: MessageHandler = async (data, requestId, ctx) => {
   const result = await ctx.settingsHandler.updateSettings(data);
@@ -73,6 +67,8 @@ export const updateSettings: MessageHandler = async (data, requestId, ctx) => {
 
 /**
  * 更新代理设置
+ *
+ * 04#6：payload 形状（{ proxySettings: object }）已由 MessageRouter 入口按 MESSAGE_SCHEMAS 校验。
  */
 export const updateProxySettings: MessageHandler = async (data, requestId, ctx) => {
   const result = await ctx.settingsHandler.updateProxySettings(data);
@@ -704,11 +700,11 @@ export const applyRemoteControl: MessageHandler = async (data, requestId, ctx) =
  * 注册设置管理处理器
  */
 export function registerSettingsHandlers(registry: Map<string, MessageHandler>): void {
-  registry.set(MESSAGE_NAMES.getSettings, settingsHandlerBoundary('GET_SETTINGS_ERROR', 'Failed to get settings', getSettings));
+  registry.set(MESSAGE_NAMES.getSettings, withBoundary('GET_SETTINGS_ERROR', 'Failed to get settings', getSettings));
   registry.set(MESSAGE_NAMES.getAppInfo, getAppInfo);
-  registry.set(MESSAGE_NAMES.updateSettings, settingsHandlerBoundary('UPDATE_SETTINGS_ERROR', 'Failed to update settings', updateSettings));
-  registry.set(MESSAGE_NAMES.updateProxySettings, settingsHandlerBoundary('UPDATE_PROXY_SETTINGS_ERROR', 'Failed to update proxy settings', updateProxySettings));
-  registry.set('updateRemoteControlSettings', settingsHandlerBoundary('UPDATE_REMOTE_CONTROL_SETTINGS_ERROR', 'Failed to update remote control settings', updateRemoteControlSettings));
+  registry.set(MESSAGE_NAMES.updateSettings, withBoundary('UPDATE_SETTINGS_ERROR', 'Failed to update settings', updateSettings));
+  registry.set(MESSAGE_NAMES.updateProxySettings, withBoundary('UPDATE_PROXY_SETTINGS_ERROR', 'Failed to update proxy settings', updateProxySettings));
+  registry.set('updateRemoteControlSettings', withBoundary('UPDATE_REMOTE_CONTROL_SETTINGS_ERROR', 'Failed to update remote control settings', updateRemoteControlSettings));
   registry.set('remoteControl.getStatus', getRemoteControlStatus);
   registry.set('remoteControl.apply', applyRemoteControl);
   registry.set(MESSAGE_NAMES.updateUISettings, updateUISettings);

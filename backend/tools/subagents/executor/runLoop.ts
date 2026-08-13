@@ -28,6 +28,10 @@ import { markAiActive } from '../../../modules/activity';
 import { SUBAGENT_NESTING_PROMPT_NOTICE, SUBAGENT_TOOL_DISCIPLINE_NOTICE } from './prompts';
 import { stripReplayedAgentInboxForModel } from './inbox';
 import { trimSubAgentHistoryForContext } from './contextTrim';
+
+// TODO(02#05): 本文件保留了 `as any`（result/response 为上游 LLM 响应，形状随渠道/流式模式变化，
+// 且 ContentPart 等类型未完全覆盖所有可选字段）。这些断言只做字段探测，不改运行时语义；
+// 待上游响应类型补齐后可替换为收窄后的类型。
 import { resolveSubAgentAvailableTools } from './context';
 import { clearRunAllowedTools, setRunAllowedTools } from './capability';
 import { executeToolCall } from './executeToolCall';
@@ -228,8 +232,8 @@ export function createDefaultExecutor(
         // 修改方式：改为句柄数组——createOperationSignal 每次 push，release 时按句柄摘除，
         //          detach 回调遍历数组逐个 detachParent。
         // 修改目的：转后台（detach）语义对并行工具调用同样正确。
-        // M5 收尾窗口超时中止在飞工具需要遍历句柄调用 abort，数组元素类型与
-        // createOperationSignal 返回的 OperationSignalHandle 保持一致（含 detachParent 与 abort）。
+        // 句柄数组供 detach 回调遍历解绑父信号；元素类型与 createOperationSignal 返回的
+        // OperationSignalHandle 保持一致（含 detachParent 与 abort）。
         let currentOperationHandles: Array<OperationSignalHandle> = [];
         // 转后台（detach）后父 abort 信号对 run 不再有约束力——所有取消检查必须经由
         // 本 helper 读取父信号（detached 后视为无父信号），否则 detach 后旧流 abort
@@ -320,7 +324,10 @@ export function createDefaultExecutor(
                         response: finalized.response,
                         error: finalized.error,
                         steps: finalized.steps,
-                        modelVersion: finalized.modelVersion
+                        modelVersion: finalized.modelVersion,
+                        // 后台任务在 run 终态事件即时回流，不再等待 executor
+                        // finally 中的 transcript 落盘；工具名因此必须同终态事件携带。
+                        toolsUsed: (finalized.toolCalls ?? []).map(toolCall => toolCall.tool)
                     }
                 });
             }
@@ -437,13 +444,17 @@ export function createDefaultExecutor(
         if (maxRuntime > 0) {
             timeoutController = new AbortController();
             // 修改原因：Monitor 暂停和等待用户操作的时间不应计入 maxRuntime，固定 setTimeout 会误把暂停时间算入运行时间。
-            // 修改方式：用短间隔轮询 checkTimeout，checkTimeout 会扣除 runController 记录的 inactiveDurationMs。
+            // 修改方式：用间隔轮询 checkTimeout，checkTimeout 会扣除 runController 记录的 inactiveDurationMs。
             // 修改目的：用户暂停查看 Monitor 或等待手动决策时，SubAgent 不会因为真实墙钟时间流逝而超时失败。
+            // 性能优化：轮询间隔由 500ms 拉大到 2000ms，把并发 run 的常驻定时器唤醒频率降为 1/4。
+            // 取舍：暂停时间扣减由 checkTimeout 内 getActiveElapsedMs（扣除 inactiveDurationMs）保证，与间隔无关；
+            //       拉大间隔只让「在飞 LLM/工具」的超时兜底中止最多晚 2s 触发，相对默认 1800s 上限可忽略，
+            //       且循环各同步点仍会即时 checkTimeout，不会在暂停期间误判超时。
             timeoutId = setInterval(() => {
                 if (checkTimeout().exceeded) {
                     timeoutController?.abort();
                 }
-            }, 500);
+            }, 2000);
             if (abortSignal && !detachedFromParent) {
                 const onParentAbort = () => {
                     if (timeoutId) {
@@ -470,7 +481,7 @@ export function createDefaultExecutor(
             release: () => void;
             /** 只解绑父 abort 信号的监听（转后台 detach 用），超时与 controller 信号保持绑定 */
             detachParent: () => void;
-            /** 主动中止本操作：触发组合 controller 的 abort（M5 收尾窗口超时中止在飞工具用） */
+            /** 主动中止本操作：触发组合 controller 的 abort（取消/超时路径用） */
             abort: () => void;
         }
 
@@ -1116,14 +1127,19 @@ export function createDefaultExecutor(
                 //          executeToolCall 由 Promise.all 并行执行，结果按原 call 顺序回填
                 //          toolCalls / toolResultParts（history push 顺序稳定）。
                 // 修改目的：嵌套子代理并行度与主会话一致；单工具调用场景行为完全不变。
-                // M5 收尾窗口：Promise.all 等待最慢工具无上限——若某工具不响应 abort 信号
-                // （挂死/网络挂起），run 永久卡在收尾窗口。加整体超时兜底：超时按失败早退；
-                // 在飞工具的 Promise 仍会执行完（其 finally 释放组合信号句柄），run 状态已终结。
-                // race 会消费全部输入 promise 的 settle，落败分支无 unhandled rejection。
-                const PARALLEL_TOOL_FINISH_WINDOW_MS = 30_000;
-                let finishTimer: ReturnType<typeof setTimeout> | undefined;
-                const toolExecutionOutcomes = await Promise.race([
-                    Promise.all(
+                // 修改原因：删除 M5 无条件 30s 超时兜底（Promise.race([Promise.all, 30s 定时器])），恢复裸
+                //          Promise.all。原定时器无条件启动，把「abort 收尾窗口兜底」变成「所有工具 30 秒
+                //          硬上限」——正常执行超过 30s 的工具（跑测试、大文件扫描、嵌套子代理、慢 MCP）
+                //          被误杀（错误信息 "Parallel tool execution did not finish within 30s; run aborted (M5)"）。
+                // 删除理由：
+                // 1. abort 收敛已由 waitForAbortableOperation 的 500ms 宽限（SUBAGENT_TOOL_ABORT_GRACE_MS）
+                //    完全覆盖：abort 信号触发 → 立即返回 aborted → executeToolCall 在 500ms 宽限后把
+                //    不响应 abort 的工具结算为 cancelled 结果 → Promise.all 收敛、run 正常收尾；
+                // 2. 正常执行时工具层自身保证落定：execute_command 有 timeout 参数（SIGTERM→SIGKILL 升级）、
+                //    嵌套 subagents 有 maxRuntime（默认 1800s）、MCP 有默认超时；
+                // 3. 与主会话 ToolExecutionService 语义对齐：正常执行裸 Promise.all 无限等待，仅靠
+                //    abort 信号 + 工具自身超时保证收敛。
+                const toolExecutionOutcomes = await Promise.all(
                         currentToolCalls.map(async (call): Promise<ToolExecutionOutcome> => {
 
                             // 执行工具前检查超时（同步预检：map 阶段按原序同步执行完毕，
@@ -1157,28 +1173,7 @@ export function createDefaultExecutor(
                                 toolOperation.release();
                             }
                         })
-                    ),
-                    new Promise<never>((_, reject) => {
-                        finishTimer = setTimeout(() => {
-                            // 修改原因：收尾窗口超时后旧逻辑仅 fail run，在飞工具 Promise 仍继续执行，
-                            //          其 tool_started/tool_completed 事件仍发往已注销 run（emit 会对
-                            //          未知 runId 自动重建 snapshot，形成僵尸记录），agentMailbox 已
-                            //          unregisterRun，工具侧 agent_send_message 投递失败。
-                            // 修改方式：超时分支对快照中的所有在飞操作句柄调用 abort（组合 controller
-                            //          中止各工具的 operationSignal；响应 abort 的工具在宽限期内收敛，
-                            //          不响应 abort 的挂死工具保持原行为，但 run 已进入终态收敛路径）。
-                            // 修改目的：收尾窗口超时后工具侧事件与信箱投递尽快收敛，不再污染已注销 run。
-                            for (const handle of [...currentOperationHandles]) {
-                                handle.abort();
-                            }
-                            reject(new Error(
-                                `Parallel tool execution did not finish within ${PARALLEL_TOOL_FINISH_WINDOW_MS / 1000}s; run aborted (M5)`
-                            ));
-                        }, PARALLEL_TOOL_FINISH_WINDOW_MS);
-                    })
-                ]).finally(() => {
-                    if (finishTimer) clearTimeout(finishTimer);
-                });
+                );
 
                 // 按原 call 顺序回填结果（toolCalls / toolResultParts 顺序与模型调用顺序一致，
                 // 保证 history push 顺序稳定）；早退标记不产生结果。

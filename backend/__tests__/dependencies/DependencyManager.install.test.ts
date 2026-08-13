@@ -14,7 +14,7 @@ import { DependencyManager } from '../../modules/dependencies/DependencyManager'
 
 // 模拟 child_process.execFile：
 // DependencyManager 使用 promisify(childProcess.execFile)，promisify 依据 fn.length
-// 决定传给回调前的参数个数，真实 execFile.length === 4 (file, args, options, callback)，这里保持一致。
+// 决定传给回调前的参数个数，真实 execFile.length === 4 (file, args, options, callback)，这里保持一致，确保 (file, args, options) 三个参数能正确传递。
 // fork 刻意使用 execFile（参数数组直传、不经 shell 解析）而非 exec，见 DependencyManager.ts。
 jest.mock('child_process', () => {
     const actual = jest.requireActual('child_process');

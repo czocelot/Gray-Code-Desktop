@@ -42,8 +42,10 @@ export class StreamChunkProcessor {
   private lastChunkFlushTime: number = 0;
   /**
    * 视图是否曾可达（H6 中止判定用）：processChunk 曾成功通过 getView() 检查即置位。
-   * 流启动时视图已不可达（从未有消费者）的场景保持既有继续消费语义，只有
-   * 「视图从可达变为不可达」（面板关闭/重载/目标 webview 销毁）才需要中止后端生成。
+   * 该标志只用于 allowHeadlessConsume === true 的兼容路径（后台任务/测试等无前端
+   * 消费者的流）：保持「只有视图从可达变为不可达（面板关闭/重载/目标 webview 销毁）
+   * 才中止」的旧语义。默认（false）下，流启动时视图已不可达（从未有消费者）同样
+   * 视为不可达并中止后端生成。
    */
   private viewEverReachable = false;
 
@@ -55,7 +57,14 @@ export class StreamChunkProcessor {
      */
     private getView: () => { webview: vscode.Webview } | undefined,
     private conversationId: string,
-    private streamId: string
+    private streamId: string,
+    /**
+     * 是否允许 headless 消费（无视图时仍继续消费后端流）。
+     * 默认 false：流启动时目标 view 已销毁/未注册即视为不可达，consume() 会立即
+     * abort 后端生成，避免无消费者时全量生成（浪费 token / 工具副作用继续执行）。
+     * 仅真正需要后台消费的路径（后台任务/测试）显式传 true 保留旧语义。
+     */
+    public allowHeadlessConsume: boolean = false
   ) {}
 
   /**
@@ -81,8 +90,14 @@ export class StreamChunkProcessor {
 
     if ('checkpointOnly' in chunk && chunk.checkpointOnly) {
       this.enqueue('checkpoints', { checkpoints: chunk.checkpoints });
-    } else if ('chunk' in chunk && chunk.chunk) {
-      // 只有真实内容增量才计入用户在场活跃（状态类事件不制造虚假在场时间）
+    } else if ('chunk' in chunk && chunk.chunk !== undefined && chunk.chunk !== null) {
+      // 文本增量：后端各渠道 formatter 统一发送对象 { delta: ContentPart[], done }
+      // （backend/modules/channel/types.ts 的 StreamChunk；anthropic/openai/openai-responses/gemini
+      // formatter 均按此构造）。2c93ad4e 曾把判定收窄为 typeof chunk.chunk === 'string'，
+      // 导致对象增量全部落入下方 unknown 分支被丢弃——前端收不到逐 token 更新，只在
+      // complete 到达时一次性替换内容（表现为「非流式」回归；1.5.3 的 truthy 判定正常）。
+      // 这里恢复对象判定（主路径），同时保留字符串/空串兼容（模型空输出补丁/心跳 chunk 等，
+      // 空增量并入批次无副作用）。只有真实内容增量才计入用户在场活跃（状态类事件不制造虚假在场时间）
       markAiActive();
       this.enqueue('chunk', { chunk: chunk.chunk }, { scheduleImmediateFlush: false });
       // 修改原因：trace 显示 webview 侧卡顿集中在 postMessage / HandlePostMessage；chunk 热路径必须真正按 50ms 合并。
@@ -171,11 +186,43 @@ export class StreamChunkProcessor {
       this.flush();
       return true;
     } else {
-      // 未知 chunk 类型：不静默丢弃，留痕便于排查后端协议演进
-      console.warn('[StreamChunkProcessor] Unknown chunk type dropped:', chunk);
+      // 未知 chunk 类型：不静默丢弃，打全原始 chunk 结构（键列表 + 尽力序列化）便于排查后端协议演进
+      let chunkDump: string;
+      try {
+        chunkDump = JSON.stringify(chunk);
+      } catch {
+        chunkDump = String(chunk);
+      }
+      console.warn(`[StreamChunkProcessor] Unknown chunk type dropped (keys: ${Object.keys(chunk).join(',')}):`, chunkDump);
     }
 
     return false;
+  }
+
+  /**
+   * 消费流直到终结事件或视图不可达（H6，公共循环）。
+   *
+   * 统一 chatStream/retryStream/toolConfirmation（StreamRequestHandler）与
+   * chat.rerollStream/chat.editBranchStream（ChatHandlers）五处消费循环，消除复制漂移：
+   * 视图不可达（面板关闭/重载）时 processChunk 丢弃 chunk 并返回 false，终结事件同样
+   * 返回 false——若循环只按 isError 判断，会永远继续消费，后端在后台全量生成
+   * （消耗 token、工具副作用继续执行）。检测到视图不可达后立即 abort 控制器
+   * 中止后端生成并停止消费；abort 信号透传给后端，pending 的流式请求快速落定。
+   */
+  async consume(
+    stream: AsyncIterable<any>,
+    controller?: AbortController
+  ): Promise<void> {
+    for await (const chunk of stream) {
+      const isError = this.processChunk(chunk);
+      if (isError) break;
+      if (this.isViewUnreachable()) {
+        controller?.abort();
+        break;
+      }
+    }
+    // 流结束后刷新缓冲区，确保所有消息都已发送
+    this.flush();
   }
 
   /**
@@ -184,11 +231,24 @@ export class StreamChunkProcessor {
    * H6：processChunk 在视图不可达时返回 false，与普通非终结 chunk 的 false 无法区分；
    * 消费方在 processChunk 返回 false 后调用本方法判断是否需要中止流——视图不可达时
    * 继续消费只会让后端在后台全量生成（消耗 token / 执行工具副作用）。
-   * getView 每次实时获取，因此本方法反映调用时刻的最新可达状态；viewEverReachable
-   * 保证「从未有视图」的流（后台任务/测试）保持既有继续消费语义。
+   * getView 每次实时获取，因此本方法反映调用时刻的最新可达状态。
+   *
+   * 默认（allowHeadlessConsume === false）下，即使从未成功取到 view（流启动时视图已
+   * 不可达/从未注册）也判定为不可达；只有显式允许 headless 消费时才沿用
+   * viewEverReachable 语义，保留「从未有视图的流（后台任务/测试）继续消费」的旧行为。
    */
   isViewUnreachable(): boolean {
-    return this.viewEverReachable && !this.getView();
+    const view = this.getView();
+    if (view) {
+      return false;
+    }
+    if (this.allowHeadlessConsume) {
+      // 兼容路径：仅「视图从可达变为不可达」视为不可达，从未有视图的流继续消费。
+      return this.viewEverReachable;
+    }
+    // 默认路径：流启动时视图已不可达（从未成功取到 view）同样视为不可达，
+    // 让 consume() 立即 abort 后端生成。
+    return true;
   }
 
   /**

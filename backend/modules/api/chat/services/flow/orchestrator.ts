@@ -27,6 +27,7 @@ import { MAIN_LOOP_ABORT_DRAIN_GRACE_MS, drainToolExecutionGeneratorAfterAbort }
 import { RepeatedCallGuard } from '../repeatedCallGuard';
 import type { ToolExecutionFullResult, ToolExecutionProgressEvent } from '../ToolExecutionService';
 import type { Content, ContentPart } from '../../../../conversation/types';
+import { ConversationMessageChangedError } from '../../../../conversation/ConversationManager';
 import type { CheckpointRecord } from '../../../../checkpoint';
 import {
   agentMailbox,
@@ -35,6 +36,7 @@ import {
 } from '../../../../../core/services/agentMailbox';
 import { resolveAndPersistPostToolStopState } from '../postToolStopState';
 import { ChatStreamOutput, ChatStreamCancelledData, ChatFlowContext, ChatFlowDeps, isFirstMessageHistory } from './context';
+import { extractAffectedPaths, workspaceUriToFsPath } from '../../../../checkpoint/affectedPaths';
 
 function isInternalMessageSource(source: ChatRequestData['source']): boolean {
   return source === 'background_task' || source === 'agent_message';
@@ -46,6 +48,27 @@ function isValidAgentMessageClaim(request: ChatRequestData): boolean {
   if (!claimId) return false;
   const claim = agentMailbox.getMessageClaim(request.conversationId, MAIN_SESSION_RUN_ID, claimId);
   return !!claim && formatAgentMessagesForModel(claim.messages) === request.message;
+}
+
+/**
+ * 在真正准备写入会话记录前独占本批后台结果。
+ *
+ * 单纯“再检查一次领取是否存在”仍有检查后被另一页面退回、随后重复领取的竞态；
+ * beginMessageClaimDelivery 会把检查与占用合并为一个同步操作，并让写入期间的 release 失败。
+ */
+function beginAgentMessageClaimDelivery(request: ChatRequestData): boolean {
+  if (request.source !== 'agent_message') return true;
+  const claimId = request.agentMessageClaimId?.trim();
+  if (!claimId || !isValidAgentMessageClaim(request)) return false;
+  return agentMailbox.beginMessageClaimDelivery(request.conversationId, MAIN_SESSION_RUN_ID, claimId);
+}
+
+/** 写入未成功确认时解除独占，保留原领取供后续重试。 */
+function endAgentMessageClaimDelivery(request: ChatRequestData): void {
+  if (request.source !== 'agent_message') return;
+  const claimId = request.agentMessageClaimId?.trim();
+  if (!claimId) return;
+  agentMailbox.endMessageClaimDelivery(request.conversationId, MAIN_SESSION_RUN_ID, claimId);
 }
 
 /**
@@ -133,41 +156,58 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
     const promptModeSnapshot = await this.resolvePromptModeSnapshot(conversationId, request.promptModeId);
     const dynamicContextStrategy = this.resolveDynamicContextStrategy(promptModeSnapshot, request.dynamicContextStrategyOverride);
 
-    if (!hiddenFunctionResponse) {
-      await this.clearPendingApprovalGateIfPresent(conversationId, 'visible_user_message');
-    }
-
     // 2.5 请求前置清理：中断上一轮未完成的 diff 等待、拒绝所有未响应的工具调用
     //（与流式 handleChatStream 对齐，避免悬空 functionCall/pending diff 跨回合残留）
     // H1：先等旧流完全退出，再执行清理与写入用户消息（避免旧流结算落在新用户消息之后）
     await this.waitForOldStreamExit(conversationId);
-    await this.prepareConversationForRequest(conversationId);
+    if (!beginAgentMessageClaimDelivery(request)) {
+      return {
+        success: false,
+        error: {
+          code: 'INVALID_AGENT_MESSAGE_CLAIM',
+          message: 'The agent message claim is missing, stale, or does not match the mailbox payload.',
+        },
+      };
+    }
 
-    // 3. 添加输入到历史；真实用户消息在创建时一次性携带动态上下文快照。
-    if (hiddenFunctionResponse) {
-      await this.upsertHiddenFunctionResponse(conversationId, hiddenFunctionResponse);
-    } else {
-      const userParts = this.messageBuilderService.buildUserMessageParts(message, request.attachments);
-      const persistedMessageId = messageId || randomUUID();
-      const internalMessage = isInternalMessageSource(request.source);
-      const turnDynamicContext = internalMessage
-        ? undefined
-        : await this.toolIterationLoopService.createTurnDynamicContext(
-            conversationId,
-            persistedMessageId,
-            promptModeSnapshot,
-            dynamicContextStrategy
-          );
-      await this.conversationManager.addMessage(conversationId, 'user', userParts, {
-        isUserInput: !internalMessage,
-        source: request.source,
-        ...(turnDynamicContext
-          ? { turnDynamicContext, turnDynamicContextStrategy: dynamicContextStrategy }
-          : {})
-      }, persistedMessageId);
-      if (request.source === 'agent_message' && request.agentMessageClaimId) {
-        agentMailbox.acknowledgeMessageClaim(conversationId, MAIN_SESSION_RUN_ID, request.agentMessageClaimId);
+    try {
+      // 最终领取校验/独占之后才执行会改变会话状态的清理。若同一批结果已经被另一请求
+      // 写入并确认，本请求会在上面直接结束，不会误清审批状态或拒绝工具调用。
+      if (!hiddenFunctionResponse) {
+        await this.clearPendingApprovalGateIfPresent(conversationId, 'visible_user_message');
       }
+      await this.prepareConversationForRequest(conversationId);
+
+      // 3. 添加输入到历史；真实用户消息在创建时一次性携带动态上下文快照。
+      if (hiddenFunctionResponse) {
+        await this.upsertHiddenFunctionResponse(conversationId, hiddenFunctionResponse);
+      } else {
+        const userParts = this.messageBuilderService.buildUserMessageParts(message, request.attachments);
+        const persistedMessageId = messageId || randomUUID();
+        const internalMessage = isInternalMessageSource(request.source);
+        const turnDynamicContext = internalMessage
+          ? undefined
+          : await this.toolIterationLoopService.createTurnDynamicContext(
+              conversationId,
+              persistedMessageId,
+              promptModeSnapshot,
+              dynamicContextStrategy
+            );
+        await this.conversationManager.addMessage(conversationId, 'user', userParts, {
+          isUserInput: !internalMessage,
+          source: request.source,
+          ...(turnDynamicContext
+            ? { turnDynamicContext, turnDynamicContextStrategy: dynamicContextStrategy }
+            : {})
+        }, persistedMessageId);
+        if (request.source === 'agent_message' && request.agentMessageClaimId) {
+          agentMailbox.acknowledgeMessageClaim(conversationId, MAIN_SESSION_RUN_ID, request.agentMessageClaimId);
+        }
+      }
+    } finally {
+      // acknowledge 已成功时会同时清掉独占状态；此前任一步抛错则只解除独占，
+      // 领取内容仍在，下一次空闲调度可以原样重试。
+      endAgentMessageClaimDelivery(request);
     }
 
     // 4. 工具调用循环（委托给 ToolIterationLoopService，非流式）
@@ -288,20 +328,33 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
     const promptModeSnapshot = await this.resolvePromptModeSnapshot(conversationId, request.promptModeId);
     const dynamicContextStrategy = this.resolveDynamicContextStrategy(promptModeSnapshot, request.dynamicContextStrategyOverride);
 
-    if (!hiddenFunctionResponse) {
-      await this.clearPendingApprovalGateIfPresent(conversationId, 'visible_user_message');
-    }
-
-
     // 3. 请求前置清理：中断上一轮未完成的 diff 等待并关闭编辑器、
     //    拒绝所有未响应的工具调用（在添加用户消息之前，确保 functionResponse
     //    会被插入到工具调用消息之后、用户消息之前）
     // H1：先等旧流完全退出（webview 层已等待过一遍，这里对直接调用入口兜底），
     // 避免旧流取消结算落在新用户消息之后（半截旧回答/错位结算）
     await this.waitForOldStreamExit(conversationId);
-    await this.prepareConversationForRequest(conversationId);
+    // claim 在等待旧流期间可能已被另一条同会话重试写入历史并 ack。初始校验只能
+    // 拦截请求进入时的陈旧 claim；真正做 prepare/addMessage 前必须再验一次，避免
+    // “后端已启动、前端因切会话返回 false 后重试”把同一后台结果写入两遍。
+    if (!beginAgentMessageClaimDelivery(request)) {
+      yield {
+        conversationId,
+        error: {
+          code: 'INVALID_AGENT_MESSAGE_CLAIM',
+          message: 'The agent message claim is missing, stale, or does not match the mailbox payload.'
+        }
+      };
+      return;
+    }
 
     try {
+      // 只有成功独占这批后台结果的请求才允许修改审批/工具状态。
+      if (!hiddenFunctionResponse) {
+        await this.clearPendingApprovalGateIfPresent(conversationId, 'visible_user_message');
+      }
+      await this.prepareConversationForRequest(conversationId);
+
       // 4/5/6. 写入输入到历史：
       // - 普通模式：用户文本消息 + before/after checkpoint
       // - 隐藏模式：写入（或替换）functionResponse，不创建可见 user 文本消息，也不创建用户消息 checkpoint
@@ -363,6 +416,9 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
         await this.upsertHiddenFunctionResponse(conversationId, hiddenFunctionResponse);
       }
     } finally {
+      // 写入前失败或生成器被取消时允许后续重试；写入成功后 acknowledge 已经消费领取，
+      // 此调用为幂等 no-op。
+      endAgentMessageClaimDelivery(request);
       // 7. 重置中断标记：中途任何 await 抛错都必须清理，
       // 否则全局中断标记残留，无会话 diff 被误取消（对照 delete 路径的 finally 用法）。
       this.diffInterruptService.resetUserInterrupt(conversationId);
@@ -529,6 +585,8 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
 
     const toolResultsThisTurn: Array<{ id: string; name: string; result: Record<string, unknown> }> = [];
     const checkpointsThisTurn: CheckpointRecord[] = [];
+    /** M3：本回合（及之前确认回合）被用户拒绝的工具 ID——补建批次 after 时排除 */
+    const rejectedToolIdsThisTurn = new Set<string>();
 
     let responseParts: ContentPart[] = [];
     let multimodalAttachments: ContentPart[] = [];
@@ -565,7 +623,11 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
         undefined,
         undefined,
         // General Worker 模型继承：把主会话当前模型透传给工具上下文
-        modelOverride
+        modelOverride,
+        // CPF-07：确认路径执行属于流式批次的一部分——批次 before/after 由批次维度统一管理
+        // （before 已在确认事件前下发、after 在队列全部完成后补建），此处跳过工具级检查点，
+        // 避免「批次存档 + 工具级存档」重复（此前每个确认工具会再自建一组 before/after）。
+        'skip'
       );
 
       while (true) {
@@ -649,6 +711,8 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
       resolvedIdsThisTurn.add(nextCall.id);
     } else {
       await this.conversationManager.rejectToolCalls(conversationId, messageIndex, [nextCall.id]);
+      // M3：记录被拒绝的工具——补建批次 after 时排除（未执行的工具不参与 afterTools 判定）
+      rejectedToolIdsThisTurn.add(nextCall.id);
 
       const rejectedResult = {
         success: false,
@@ -711,7 +775,10 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
         undefined,
         undefined,
         // General Worker 模型继承：把主会话当前模型透传给工具上下文
-        modelOverride
+        modelOverride,
+        // CPF-07：与队首工具一致——确认回合内执行的工具统一跳过工具级检查点，
+        // 批次 after 在队列全部完成后补建（见下方「队列已全部完成」分支）。
+        'skip'
       );
 
       while (true) {
@@ -874,6 +941,67 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
       return;
     }
 
+    // CPF-07：确认路径工具队列已全部完成（无下一个待确认工具）——补建批次 after。
+    // 批次 before 已在流式阶段（确认事件下发前）创建；after 挂模型消息索引，
+    // CheckpointManager 按批内工具与 afterTools 的交集精确判定（批内无配置 after 的工具则跳过）。
+    // 多个确认回合时只在最后一个回合（队列耗尽）补建一次；取消/中断路径不补（与流式语义一致）。
+    // M3：本回合被用户拒绝的工具从未执行，不计入批内工具名——
+    // 否则「批内唯一工具被拒」也会因该工具的 afterTools 配置产生一对空批次存档。
+    // 已知风险（保持现状，不改）：modelMessageIndex 来自「从后往前找最近一个含函数调用的 model 消息」，
+    // 若该消息已被总结/裁剪，索引可能偏移——架构性改动超出本次范围，存档挂载位置不影响内容正确性。
+    // checkpointService 未注入（测试 harness/降级环境）时跳过补建。
+    if (this.checkpointService) {
+      const executedBatchToolNames = allFunctionCalls
+        .filter(c => !rejectedToolIdsThisTurn.has(c.id))
+        .map(c => c.name);
+      // CP-PARTIAL-1：确认路径补建批次 after 同样按受影响路径构建部分快照（不再全量扫描工作区）——
+      // 仅当批内全部已执行工具都能确定受影响路径时透传，任一无法确定（execute_command 等）则回退全量。
+      // 工作区根 fsPath 从会话元数据解析（getMetadata 防御性探测：测试替身可能未实现，缺失时回退全量）。
+      let affectedPaths: string[] | undefined;
+      let workspaceRootFsPath: string | undefined;
+      try {
+        const meta = await this.conversationManager.getMetadata(conversationId);
+        workspaceRootFsPath = meta?.workspaceUri ? (workspaceUriToFsPath(meta.workspaceUri) ?? undefined) : undefined;
+      } catch {
+        // 元数据读取失败：回退全量
+      }
+      if (workspaceRootFsPath) {
+        const accumulated: string[] = [];
+        const seen = new Set<string>();
+        for (const c of allFunctionCalls) {
+          if (rejectedToolIdsThisTurn.has(c.id)) continue;
+          const paths = extractAffectedPaths(c.name, c.args, workspaceRootFsPath);
+          if (paths === null) {
+            accumulated.length = 0;
+            break;
+          }
+          for (const p of paths) {
+            if (!seen.has(p)) {
+              seen.add(p);
+              accumulated.push(p);
+            }
+          }
+        }
+        if (accumulated.length > 0) {
+          affectedPaths = accumulated;
+        }
+      }
+      const batchAfterCheckpoint = await this.checkpointService.createToolExecutionCheckpoint(
+        conversationId,
+        modelMessageIndex,
+        'tool_batch',
+        'after',
+        undefined,
+        {
+          batchToolNames: executedBatchToolNames,
+          ...(affectedPaths ? { affectedPaths } : {}),
+        }
+      );
+      if (batchAfterCheckpoint) {
+        checkpointsThisTurn.push(batchAfterCheckpoint);
+      }
+    }
+
     // 7. 工具队列已全部完成，发送 toolIteration，并继续 AI 对话
     yield {
       conversationId,
@@ -924,17 +1052,18 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
     // H1：先等旧流完全退出，再执行删除（旧流取消结算若落在删除之后会把已删内容追加回来）
     await this.waitForOldStreamExit(conversationId);
 
-    // 2. 中断之前未完成的 diff 等待
-    this.diffInterruptService.markUserInterrupt(conversationId);
-
+    let diffInterruptMarked = false;
     try {
-      // M1：请求带 messageId 时校验索引处消息 id 一致，防止索引漂移误删其他消息。
-      // 旧前端不传时保持旧行为。
+      // M1：请求带 messageId 时校验索引处消息 id 一致，防止后台子代理回执等并发写入
+      // 让旧索引误删其他消息。旧前端不传时保持旧行为。
       const requestMessageId = request.messageId;
+      const expectedMessageId = typeof requestMessageId === 'string' && requestMessageId.trim() !== ''
+        ? requestMessageId.trim()
+        : undefined;
       // 决策 6：分支图同步已收敛进 ConversationManager.deleteToMessage（锁内捕获锚点、
       // 锁外经 graphSyncQueues 串行队列执行，与 deleteMessage/clearHistory 同模式）；
-      // 这里仅保留删除前的历史快照用于 M1 校验（校验与删除之间不得有其他写入，
-      // rejectAllPendingToolCalls 只追加）。
+      // 这里读取的历史只用于边界提示和 M1 快速预检。后续 diff/tool/checkpoint 清理均有
+      // await，期间允许其他写入，所以并发正确性由 manager 的锁内最终校验保证。
       const historyBeforeDelete = await this.conversationManager.getMessagesRaw(conversationId);
       // C-3：校验 targetIndex 边界。负数/越界此前会让删除语义错误（deleteToMessage 锁内
       // 会重新校验并抛错），这里在删除动作前显式拒绝，返回明确的 INVALID_TARGET_INDEX。
@@ -947,9 +1076,9 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
           },
         };
       }
-      if (typeof requestMessageId === 'string' && requestMessageId.trim() !== '') {
+      if (expectedMessageId) {
         const targetMessage = historyBeforeDelete[targetIndex];
-        if (!targetMessage || targetMessage.id !== requestMessageId.trim()) {
+        if (!targetMessage || targetMessage.id !== expectedMessageId) {
           return {
             success: false,
             error: {
@@ -960,30 +1089,88 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
         }
       }
 
-      // 3. 取消所有待处理的 diff（关闭编辑器并恢复文件）
-      await this.diffInterruptService.cancelAllPending(conversationId);
-      
-      // 4. 拒绝所有未响应的工具调用并持久化
-      await this.conversationManager.rejectAllPendingToolCalls(conversationId);
-
-      await this.clearPendingApprovalGateIfPresent(conversationId, 'delete_to_message');
-
-      // 5. 删除关联的检查点（回档场景下保留刚用于恢复的存档点，支持反复回档）
-      await this.checkpointService.deleteCheckpointsFromIndex(conversationId, targetIndex, preserveCheckpointId);
-
-      // 6. 删除消息（决策 6 分支图同步已收敛进 ConversationManager.deleteToMessage：锁内捕获
+      // 3. 先原子删除消息（决策 6 分支图同步已收敛进 ConversationManager.deleteToMessage：锁内捕获
       // deletedFromMessageId / lastKeptMessageId / deletedWasSummary，锁外经 withGraphSyncQueue
       // 会话级串行队列同步软删「该点之后」的整棵子树，删除响应返回前图一致；失败仅告警不阻断，
       // 主历史为唯一真源。此处不再直接调用 BranchService——避免与 manager 侧双同步，且与
       // deleteMessage/clearHistory/restoreSnapshot 的队列互斥语义统一（先入队的 append 图同步
-      // 必须先完成，再执行本次软删）。
-      const deletedCount = await this.conversationManager.deleteToMessage(conversationId, targetIndex);
+      // 必须先完成，再执行本次软删）。权威 messageId 校验必须是预检后的第一个持久化动作；
+      // 否则陈旧请求虽然最终返回 MESSAGE_CHANGED，却已经取消 diff、拒绝工具调用或清掉审批门。
+      let deletedCount = 0;
+      const deletionCapture = { deletedMessageIds: [] as string[] };
+      try {
+        // expectedMessageId 会在 ConversationManager 的 mutateContents 写锁内再次校验；
+      // 上面的预检只负责尽早失败，不能作为并发正确性的依据。
+        const runPostDeleteCleanup = async (label: string, action: () => Promise<unknown>): Promise<void> => {
+          try {
+            await action();
+          } catch (error) {
+            console.warn(`[ChatFlow] Post-delete cleanup failed (${label})`, error);
+          }
+        };
 
-      // 6.5 根据剩余历史重放 todo 工具，修正 ConversationMetadata.custom.todoList
-      await this.rebuildTodoListMetadataFromHistory(conversationId);
-      
-      // 7. 清除裁剪状态（回退后应重新计算裁剪）
-      await this.toolIterationLoopService.clearTrimState(conversationId);
+        // 检查点操作锁必须覆盖 transcript 截断到检查点删除的完整窗口，锁序为
+        // checkpoint → conversation。否则截断提交后、按旧 index 清理前，并发创建的
+        // before 检查点可能落到相同 index 并被本次旧请求误删。
+        await this.checkpointService.runWithCheckpointDeletionLock(
+          conversationId,
+          async deleteCheckpointsFromIndexLocked => {
+            deletedCount = await this.conversationManager.deleteToMessage(
+              conversationId,
+              targetIndex,
+              expectedMessageId,
+              deletionCapture,
+            );
+
+            // 权威删除已经提交后才广播用户中断；陈旧 messageId 请求若在这里之前被拒绝，
+            // 不应让仍在工作的 diff 观察到一次虚假的中断。
+            this.diffInterruptService.markUserInterrupt(conversationId);
+            diffInterruptMarked = true;
+
+            // lineage 使用 manager 在截断锁内捕获的被删消息 ID；检查点删除失败属于派生清理
+            // 失败，记录告警但不把已成功的 transcript 截断伪装成失败。
+            await runPostDeleteCleanup('checkpoints', () => deleteCheckpointsFromIndexLocked(
+              targetIndex,
+              preserveCheckpointId,
+              new Set(deletionCapture.deletedMessageIds),
+            ));
+          }
+        );
+      } catch (error) {
+        if (error instanceof ConversationMessageChangedError) {
+          return {
+            success: false,
+            error: {
+              code: 'MESSAGE_CHANGED',
+              message: t('modules.api.chat.errors.messageChanged'),
+            },
+          };
+        }
+        throw error;
+      }
+
+      // 4. 历史原子截断成功后再删除关联检查点。预检后的 await 若发生索引漂移，
+      // 上面的锁内校验会先返回 MESSAGE_CHANGED，不能提前提交不可回滚的 checkpoint 删除。
+      // lineage 必须使用 manager 在截断写锁内捕获的被删消息 ID；此时主历史已截断，
+      // 若重新从 history.slice(targetIndex) 推导会得到空集合并错误保留分支检查点。
+      // 从这里开始主历史已经提交，所有派生清理都降级为 best effort：其中任一失败若再向
+      // 调用方报“删除失败”，用户按旧 index 重试只会得到 MESSAGE_CHANGED，并永久跳过其余清理。
+      const runPostDeleteCleanup = async (label: string, action: () => Promise<unknown>): Promise<void> => {
+        try {
+          await action();
+        } catch (error) {
+          console.warn(`[ChatFlow] Post-delete cleanup failed (${label})`, error);
+        }
+      };
+
+      // 5. 删除已提交后，再清理本会话仍悬挂的编辑器、工具调用与审批状态。
+      await runPostDeleteCleanup('pending diffs', () => this.diffInterruptService.cancelAllPending(conversationId));
+      await runPostDeleteCleanup('pending tool calls', () => this.conversationManager.rejectAllPendingToolCalls(conversationId));
+      await runPostDeleteCleanup('approval gate', () => this.clearPendingApprovalGateIfPresent(conversationId, 'delete_to_message'));
+
+      // 6. 根据剩余历史重放 todo，并清除裁剪状态（回退后应重新计算裁剪）。
+      await runPostDeleteCleanup('todo metadata', () => this.rebuildTodoListMetadataFromHistory(conversationId));
+      await runPostDeleteCleanup('trim state', () => this.toolIterationLoopService.clearTrimState(conversationId));
 
       return {
         success: true,
@@ -992,7 +1179,9 @@ export class ChatFlowOrchestrator extends ChatFlowContext {
     } finally {
       // 8. 重置 diff 中断标记：mark 之后的任何 await 抛错都必须清理，
       // 否则全局中断标记残留，无会话 diff 被误取消。
-      this.diffInterruptService.resetUserInterrupt(conversationId);
+      if (diffInterruptMarked) {
+        this.diffInterruptService.resetUserInterrupt(conversationId);
+      }
     }
   }
 }

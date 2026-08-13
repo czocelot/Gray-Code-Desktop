@@ -260,6 +260,14 @@ export class CheckpointManager {
             progress?: (progress: CheckpointOperationProgress) => void;
             messageNodeId?: string;
             forceCreate?: boolean;
+            /** 批内工具名（tool_batch 精确判定用）：按批内工具与 beforeTools/afterTools 的交集决定是否创建 */
+            batchToolNames?: string[];
+            /**
+             * CP-PARTIAL-1：受影响文件绝对路径（工具执行存档按参数限定的文件构建部分快照，
+             * 不再全量扫描工作区）。缺省（undefined）= 全量扫描（既有行为）。
+             * forceCreate 手动存档 / user_message / model_message 存档不要传本字段。
+             */
+            affectedPaths?: string[];
         }
     ): Promise<CheckpointRecord | null> {
         // 检查是否应该创建检查点
@@ -281,9 +289,19 @@ export class CheckpointManager {
                     shouldCreate = config.messageCheckpoint?.afterMessages?.includes(messageType) ?? false;
                 }
             } else if (toolName === 'tool_batch') {
-                // 批量工具：只要配置了任何工具的检查点，就创建
-                // tool_batch 表示多个工具调用被批量处理
-                if (phase === 'before') {
+                // 批量工具：按批内工具与 beforeTools/afterTools 的交集精确判定（CPF-07 批次检查点）。
+                // 旧实现只检查「对应列表非空」——只要用户给任意工具勾过 before，批内仅配置了
+                // after 的工具（如只勾了「执行后」的 write_file）也会错误触发批次 before 存档。
+                // 显式传空数组（batchToolNames = []）＝无工具不建存档；未传时（旧调用方）
+                // 回退旧语义：任一列表非空即创建。
+                const batchToolNames = options?.batchToolNames;
+                if (batchToolNames !== undefined) {
+                    if (phase === 'before') {
+                        shouldCreate = batchToolNames.some(name => config.beforeTools.includes(name));
+                    } else {
+                        shouldCreate = batchToolNames.some(name => config.afterTools.includes(name));
+                    }
+                } else if (phase === 'before') {
                     shouldCreate = config.beforeTools.length > 0;
                 } else {
                     shouldCreate = config.afterTools.length > 0;
@@ -384,6 +402,7 @@ export class CheckpointManager {
                 checkpointId,
                 backupDir,
                 roots,
+                affectedPaths: options?.affectedPaths,
                 signal,
                 reportProgress
             }),
@@ -809,6 +828,26 @@ export class CheckpointManager {
     private async deleteCheckpointInternal(conversationId: string, checkpointId: string): Promise<boolean> {
         return this.deletionService.deleteCheckpointInternal(conversationId, checkpointId);
     }
+
+    /**
+     * 为“截断对话记录并删除对应检查点”持有一把完整的检查点操作锁。
+     *
+     * 锁序固定为 checkpoint → conversation：调用方进入 task 后才可修改对话记录。
+     * task 会收到本次唯一 ownerId，随后调用 deleteCheckpointsFromIndex 时原样传回即可
+     * 走同 owner 可重入路径，避免等待自己持有的锁。
+     */
+    async runWithCheckpointDeletionLock<T>(
+        conversationId: string,
+        task: (ownerId: string) => Promise<T>
+    ): Promise<T> {
+        const ownerId = `checkpoint:${conversationId}:history-delete:${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        return await checkpointOperationLockManager.runExclusive(
+            this.getCheckpointDeletionLockIds(),
+            'delete',
+            ownerId,
+            () => task(ownerId)
+        );
+    }
     
     /**
      * 删除指定消息索引及之后的检查点
@@ -818,33 +857,43 @@ export class CheckpointManager {
      * @param excludeCheckpointId 可选，保留该检查点（含其增量基链）。
      *                            用于回档场景：刚用于恢复的存档点应保留，支持反复回档到同一位置。
      */
-    async deleteCheckpointsFromIndex(conversationId: string, fromIndex: number, excludeCheckpointId?: string): Promise<number> {
+    async deleteCheckpointsFromIndex(
+        conversationId: string,
+        fromIndex: number,
+        excludeCheckpointId?: string,
+        lineageNodeIdsOverride?: ReadonlySet<string>,
+        lockOwnerId?: string
+    ): Promise<number> {
         // CPF-11: 删除操作注册进度/取消句柄（与 deleteAllCheckpoints/deleteCheckpointsBatch 对齐）
         const { operationId, signal, report } = this.beginOperation('delete', conversationId);
         try {
             return await checkpointOperationLockManager.runExclusive(
                 this.getCheckpointDeletionLockIds(),
                 'delete',
-                `checkpoint:${conversationId}:delete-from-index:${operationId}`,
+                lockOwnerId ?? `checkpoint:${conversationId}:delete-from-index:${operationId}`,
                 async () => {
                     // BCP-08 分支隔离：读取主历史 fromIndex 之后的节点 id 集合作为当前分支 lineage，
                     // 传给删除服务只删该分支的存档（分支 A 编辑消息时不误删分支 B 中 messageIndex
                     // >= fromIndex 的存档——B 的 BranchGraph 仍引用它们）。
                     // 读取失败（IO 异常）→ lineage 缺省，回退按索引删除的旧语义
                     //（与 deleteCheckpointsByNodeIds 缺省 referenceCounts 跳过引用计数闸门同模式）。
-                    let lineageNodeIds: Set<string> | undefined;
-                    try {
-                        const history = await this.conversationManager.getMessagesRaw(conversationId);
-                        lineageNodeIds = new Set(
-                            history.slice(Math.max(0, fromIndex))
-                                .map(m => m.id)
-                                .filter((id): id is string => typeof id === 'string' && id.length > 0)
-                        );
-                    } catch (err) {
-                        log.warn('delete_checkpoints_from_index_lineage_read_failed', {
-                            conversationId,
-                            error: err instanceof Error ? err.message : String(err)
-                        });
+                    let lineageNodeIds: Set<string> | undefined = lineageNodeIdsOverride === undefined
+                        ? undefined
+                        : new Set(lineageNodeIdsOverride);
+                    if (lineageNodeIdsOverride === undefined) {
+                        try {
+                            const history = await this.conversationManager.getMessagesRaw(conversationId);
+                            lineageNodeIds = new Set(
+                                history.slice(Math.max(0, fromIndex))
+                                    .map(m => m.id)
+                                    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+                            );
+                        } catch (err) {
+                            log.warn('delete_checkpoints_from_index_lineage_read_failed', {
+                                conversationId,
+                                error: err instanceof Error ? err.message : String(err)
+                            });
+                        }
                     }
                     try {
                         const count = await this.deletionService.deleteCheckpointsFromIndexInternal(

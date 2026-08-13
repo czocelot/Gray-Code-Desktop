@@ -358,21 +358,21 @@ export interface DeleteToMessageRequestData {
     targetIndex: number;
 
     /**
+     * 目标消息的稳定 ID（防并发回流导致索引漂移）。
+     *
+     * 后台子代理完成回执可能在用户点击删除前后追加消息；服务端必须同时校验
+     * targetIndex 与 messageId，避免按陈旧索引删除另一条消息、却把目标回执留在
+     * transcript 中继续发送给模型。旧客户端省略该字段时仍按索引处理。
+     */
+    messageId?: string;
+
+    /**
      * 可选，保留的检查点 ID（含其增量基链）
      *
      * 回档场景下传入刚用于恢复的存档点，使其不随消息删除而消失，
      * 支持用户反复回档到同一位置。
      */
     preserveCheckpointId?: string;
-
-    /**
-     * 可选，被删除消息的消息 ID（防索引漂移校验）。
-     *
-     * 请求带 messageId 时，后端会校验 targetIndex 处消息 id 一致；
-     * 不一致说明索引已漂移（并发插入/删除/上下文压缩等），返回 MESSAGE_CHANGED。
-     * 旧前端不带该字段时保持旧行为（仅按索引操作）。
-     */
-    messageId?: string;
 }
 
 /**

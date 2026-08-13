@@ -7,6 +7,7 @@
 
 import {
     FileWriteLockManager,
+    isPathCaseInsensitive,
     normalizeLockPath,
     getWritePathsForCall,
     type LockHolder
@@ -16,20 +17,17 @@ const holderA: LockHolder = { kind: 'subagent', id: 'run_a', label: 'Agent A' };
 const holderB: LockHolder = { kind: 'subagent', id: 'run_b', label: 'Agent B' };
 const holderMain: LockHolder = { kind: 'main', id: 'conversation_1', label: 'main session' };
 
-// 大小写归一行为随文件系统区分大小写能力变化（win32 不区分，其余平台区分）：
-// 平台专属断言必须用 skip 门控，避免在另一平台误跑失败
-const isWin32 = process.platform === 'win32';
-const itOnWin32 = isWin32 ? it : it.skip;
-const itOnNonWin32 = isWin32 ? it.skip : it;
+// 默认行为必须按当前测试目录所在卷探测，不能再按 win32/darwin 平台名推断。
+const isCurrentVolumeCaseInsensitive = isPathCaseInsensitive(process.cwd());
+const itOnCaseInsensitiveVolume = isCurrentVolumeCaseInsensitive ? it : it.skip;
+const itOnCaseSensitiveVolume = isCurrentVolumeCaseInsensitive ? it.skip : it;
 
 describe('normalizeLockPath', () => {
-    test('统一反斜杠（win32 小写化，其他平台保留大小写）', () => {
+    test('统一反斜杠，并按当前卷语义决定是否小写化', () => {
         const normalized = normalizeLockPath('Src\\Foo\\Bar.TS');
-        if (process.platform === 'win32') {
-            // Windows 文件系统不区分大小写：锁 key 小写归一
+        if (isCurrentVolumeCaseInsensitive) {
             expect(normalized).toBe('src/foo/bar.ts');
         } else {
-            // 大小写敏感文件系统：只归一化分隔符，不改变大小写
             expect(normalized).toBe('Src/Foo/Bar.TS');
         }
     });
@@ -47,6 +45,13 @@ describe('normalizeLockPath', () => {
 
     test('折叠重复分隔符', () => {
         expect(normalizeLockPath('src//a.ts')).toBe('src/a.ts');
+    });
+
+    test('大小写折叠由目标卷语义决定，而不是由 darwin 平台名决定', () => {
+        expect(normalizeLockPath('/Volumes/CaseSensitive/Foo.ts', false))
+            .toBe('/Volumes/CaseSensitive/Foo.ts');
+        expect(normalizeLockPath('/Volumes/Default/Foo.ts', true))
+            .toBe('/volumes/default/foo.ts');
     });
 });
 
@@ -105,18 +110,29 @@ describe('FileWriteLockManager', () => {
         }
     });
 
-    itOnWin32('win32：路径大小写与分隔符差异均视为同一文件', () => {
-        manager.tryAcquire(['src/A.ts'], holderA);
-        expect(manager.tryAcquire(['SRC\\a.TS'], holderB).acquired).toBe(false);
+    test('大小写敏感卷允许锁定仅大小写不同的两个真实路径', () => {
+        const caseSensitiveManager = new FileWriteLockManager(() => false);
+        expect(caseSensitiveManager.tryAcquire(['/Volumes/CaseSensitive/Foo.ts'], holderA).acquired).toBe(true);
+        expect(caseSensitiveManager.tryAcquire(['/Volumes/CaseSensitive/foo.ts'], holderB).acquired).toBe(true);
     });
 
-    itOnNonWin32('非 win32：分隔符差异视为同一文件，大小写差异不冲突（大小写敏感文件系统）', () => {
-        // 反斜杠与斜杠写法归一为同一 key，互斥
+    test('大小写不敏感卷把仅大小写不同的路径视为同一目标', () => {
+        const caseInsensitiveManager = new FileWriteLockManager(() => true);
+        expect(caseInsensitiveManager.tryAcquire(['/Volumes/Default/Foo.ts'], holderA).acquired).toBe(true);
+        expect(caseInsensitiveManager.tryAcquire(['/Volumes/Default/foo.ts'], holderB).acquired).toBe(false);
+    });
+
+    test('所有平台都统一反斜杠与斜杠', () => {
         manager.tryAcquire(['src/A.ts'], holderA);
         expect(manager.tryAcquire(['src\\A.ts'], holderB).acquired).toBe(false);
-        manager.release(['src\\A.ts'], holderA);
+    });
 
-        // 仅大小写不同的路径是不同文件，不互斥
+    itOnCaseInsensitiveVolume('当前大小写不敏感卷：仅大小写不同的路径互斥', () => {
+        manager.tryAcquire(['src/A.ts'], holderA);
+        expect(manager.tryAcquire(['SRC/a.TS'], holderB).acquired).toBe(false);
+    });
+
+    itOnCaseSensitiveVolume('当前大小写敏感卷：仅大小写不同的路径不互斥', () => {
         manager.tryAcquire(['src/A.ts'], holderA);
         expect(manager.tryAcquire(['SRC/a.TS'], holderB).acquired).toBe(true);
     });

@@ -209,11 +209,14 @@ export class ToolsSettingsService {
             
             await this.core.storage.save(this.core.settings);
             
+            // 事件负载统一深拷贝（与 SettingsCore full/tools 事件口径一致）：
+            // newValue 直接引用 this.core.settings.toolsEnabled 活对象，监听器原地修改
+            // 会污染核心状态
             this.core.notifyChange({
                 type: 'tools',
                 path: 'toolsEnabled',
-                oldValue,
-                newValue: this.core.settings.toolsEnabled,
+                oldValue: this.core.cloneConfig(oldValue),
+                newValue: this.core.cloneConfig(this.core.settings.toolsEnabled),
                 settings: this.core.cloneConfig(this.core.settings)
             });
         });
@@ -247,11 +250,12 @@ export class ToolsSettingsService {
             
             await this.core.storage.save(this.core.settings);
             
+            // 事件负载统一深拷贝（同 setToolEnabled 口径）：newValue 不得传活引用
             this.core.notifyChange({
                 type: 'tools',
                 path: 'toolsEnabled',
-                oldValue,
-                newValue: this.core.settings.toolsEnabled,
+                oldValue: this.core.cloneConfig(oldValue),
+                newValue: this.core.cloneConfig(this.core.settings.toolsEnabled),
                 settings: this.core.cloneConfig(this.core.settings)
             });
         });
@@ -325,8 +329,8 @@ export class ToolsSettingsService {
             this.core.notifyChange({
                 type: 'tools',
                 path: 'toolAutoExec',
-                oldValue: oldConfig,
-                newValue: this.core.settings.toolAutoExec,
+                oldValue: this.core.cloneConfig(oldConfig),
+                newValue: this.core.cloneConfig(this.core.settings.toolAutoExec),
                 settings: this.core.cloneConfig(this.core.settings)
             });
         });
@@ -349,8 +353,8 @@ export class ToolsSettingsService {
             this.core.notifyChange({
                 type: 'tools',
                 path: 'toolAutoExec',
-                oldValue: oldConfig,
-                newValue: this.core.settings.toolAutoExec,
+                oldValue: this.core.cloneConfig(oldConfig),
+                newValue: this.core.cloneConfig(this.core.settings.toolAutoExec),
                 settings: this.core.cloneConfig(this.core.settings)
             });
         });

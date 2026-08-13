@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolDeclaration, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { getAllWorkspaces, getWorkspaceByUri, resolveUriWithInfo } from '../utils';
 import { slugify } from '../shared/slugify';
 import { PROGRESS_PATH_SCOPE_LABEL, buildPathRejectedError } from '../shared/pathPolicy';
@@ -110,7 +111,7 @@ export function createCreateProgressTool(): Tool {
   return {
     declaration: createCreateProgressToolDeclaration(),
     handler: async (rawArgs: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> => {
-      const args = rawArgs as unknown as CreateProgressArgs;
+      const args = parseArgs<CreateProgressArgs>(rawArgs);
       const outPath = typeof args.path === 'string' && args.path.trim()
         ? args.path.trim()
         : '.graycode/progress.md';

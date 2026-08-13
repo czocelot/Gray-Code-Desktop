@@ -18,7 +18,11 @@ import { ensureOutsideWorkspaceAccessApproved } from '../file/outsideWorkspaceAc
 import { TaskManager, type TaskEvent } from '../taskManager';
 import { withLinkedAbort } from '../abortLink';
 import { getSharp } from '../../modules/dependencies';
-import { ensureMediaPathsSafe, MEDIA_MAX_INPUT_BYTES } from './pathGuard';
+import { ensureMediaPathsSafe } from './pathGuard';
+import { readImageFile } from './imageUtils';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+import { buildCropImageDescriptions, type CropImageDescriptions } from '../localization/dynamicDescriptions';
 
 /** 裁切任务类型常量 */
 const TASK_TYPE_CROP = 'crop_image';
@@ -121,50 +125,6 @@ interface TaskResult {
 }
 
 /**
- * 读取图片文件
- */
-async function readImageFile(imagePath: string, context?: ToolContext): Promise<{ data: Buffer; mimeType: string } | null> {
-    const { uri, isOutsideWorkspace } = resolveFileToolPathWithInfo(imagePath, context?.activeWorkspaceUri);
-    if (!uri) {
-        return null;
-    }
-
-    // 工作区外读取：按 read 策略审批（deny 拒绝 / ask 需确认 / allow 放行）
-    if (isOutsideWorkspace) {
-        const readAccessError = ensureOutsideWorkspaceAccessApproved('read_file', { path: imagePath }, context);
-        if (readAccessError) {
-            return null;
-        }
-    }
-
-    try {
-        const stat = await vscode.workspace.fs.stat(uri);
-        if (stat.size > MEDIA_MAX_INPUT_BYTES) {
-            console.warn(`Image file exceeds ${MEDIA_MAX_INPUT_BYTES} bytes: ${imagePath}`);
-            return null;
-        }
-
-        const content = await vscode.workspace.fs.readFile(uri);
-        const ext = path.extname(imagePath).toLowerCase();
-        let mimeType = 'image/png';
-        if (ext === '.jpg' || ext === '.jpeg') {
-            mimeType = 'image/jpeg';
-        } else if (ext === '.webp') {
-            mimeType = 'image/webp';
-        } else if (ext === '.gif') {
-            mimeType = 'image/gif';
-        }
-
-        return {
-            data: Buffer.from(content),
-            mimeType
-        };
-    } catch (error) {
-        return null;
-    }
-}
-
-/**
  * 执行单个裁切任务
  */
 async function executeCropTask(
@@ -225,7 +185,7 @@ async function executeCropTask(
         }
 
         // 读取原图
-        const imageFile = await readImageFile(image_path, context);
+        const imageFile = await readImageFile(image_path, context, 'crop_image');
         if (!imageFile) {
             return { index, success: false, error: `Task ${index + 1}: Cannot read image: ${image_path}` };
         }
@@ -302,7 +262,7 @@ async function executeCropTask(
 
         // 工作区外写入：按 write 策略审批（与 write_file 保持一致）
         if (outputOutside) {
-            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context);
+            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context, 'crop_image');
             if (writeAccessError) {
                 return { index, success: false, error: `Task ${index + 1}: ${writeAccessError}` };
             }
@@ -365,61 +325,22 @@ async function executeCropTask(
 }
 
 /**
- * 生成工具描述（根据配置动态生成）
+ * 生成工具描述（根据配置动态生成，语言感知）
+ *
+ * 根据当前实际界面语言（zh-CN/en/ja）生成模型可见说明：
+ * - 归一化坐标（0-1000）与像素坐标两套说明（由 useNormalized 决定）；
+ * - 动态任务上限与多根工作区尾巴；
+ * - 顶层说明与参数说明统一由 localization/dynamicDescriptions 的语言感知生成器负责。
  */
-function generateDescription(maxBatchTasks: number, isMultiRoot: boolean, workspaces: { name: string }[], useNormalized: boolean): string {
-    let description: string;
-    
-    if (useNormalized) {
-        description = `Crop image tool. Uses normalized coordinates (0-1000) to specify the crop region.
-
-**Coordinate System (Normalized Mode)**:
-- Uses normalized coordinates in range 0-1000
-- (0, 0) represents top-left corner
-- (1000, 1000) represents bottom-right corner
-- Tool automatically converts to actual pixel coordinates
-
-**Parameters**:
-- x1, y1: Top-left corner coordinates of crop region (0-1000)
-- x2, y2: Bottom-right corner coordinates of crop region (0-1000)
-- x1 must be less than x2, y1 must be less than y2
-
-**Examples**:
-- Crop top-left quarter: x1=0, y1=0, x2=500, y2=500
-- Crop center region: x1=250, y1=250, x2=750, y2=750
-- Crop bottom-right: x1=500, y1=500, x2=1000, y2=1000`;
-    } else {
-        description = `Crop image tool. Uses pixel coordinates to specify the crop region.
-
-**Coordinate System (Pixel Mode)**:
-- Uses actual pixel coordinates of the image
-- (0, 0) represents top-left corner
-- Coordinates are in pixels
-- Need to calculate coordinates based on actual image dimensions
-
-**Parameters**:
-- x1, y1: Top-left corner coordinates (pixels)
-- x2, y2: Bottom-right corner coordinates (pixels)
-- x1 must be less than x2, y1 must be less than y2
-
-**Examples** (assuming 1920x1080 image):
-- Crop top-left quarter: x1=0, y1=0, x2=960, y2=540
-- Crop center region: x1=480, y1=270, x2=1440, y2=810
-- Crop bottom-right: x1=960, y1=540, x2=1920, y2=1080`;
-    }
-
-    description += `
-
-**Supported Formats**: PNG, JPEG, WebP (auto-selected based on output path extension)
-
-**Limits**:
-- Maximum ${maxBatchTasks} crop tasks per call`;
-
-    if (isMultiRoot) {
-        description += `\n\n**Multi-root Workspace**: Use "workspace_name/path" format for paths. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
-    }
-
-    return description;
+function generateDescription(maxBatchTasks: number, isMultiRoot: boolean, workspaces: { name: string }[], useNormalized: boolean): CropImageDescriptions {
+    const lang = resolveLocalizationLanguage(getActualLanguage());
+    return buildCropImageDescriptions({
+        lang,
+        maxBatchTasks,
+        isMultiRoot,
+        workspaceNames: workspaces.map(w => w.name),
+        useNormalized
+    });
 }
 
 /**
@@ -433,12 +354,14 @@ export function createCropImageTool(maxBatchTasks: number = 10, defaultOptions?:
     const isMultiRoot = workspaces.length > 1;
     const useNormalized = defaultOptions?.useNormalizedCoordinates ?? true;
 
-    const description = generateDescription(maxBatchTasks, isMultiRoot, workspaces, useNormalized);
+    // 语言感知：根据当前实际界面语言（zh-CN/en/ja）生成模型可见说明
+    // （generateDescription 内部通过 getActualLanguage() + resolveLocalizationLanguage() 选语言）
+    const cropDescriptions = generateDescription(maxBatchTasks, isMultiRoot, workspaces, useNormalized);
 
     return {
         declaration: {
             name: 'crop_image',
-            description,
+            description: cropDescriptions.description,
             category: 'media',
             dependencies: ['sharp'],  // 声明依赖 sharp
             parameters: {
@@ -447,33 +370,33 @@ export function createCropImageTool(maxBatchTasks: number = 10, defaultOptions?:
                     // 批量模式参数
                     images: {
                         type: 'array',
-                        description: 'Batch mode: Array of crop tasks. Each task can independently configure input, output and crop coordinates. MUST be an array even for single task.',
+                        description: cropDescriptions.images,
                         items: {
                             type: 'object',
                             properties: {
                                 image_path: {
                                     type: 'string',
-                                    description: 'Source image path (required)'
+                                    description: cropDescriptions.batchImagePath
                                 },
                                 output_path: {
                                     type: 'string',
-                                    description: 'Output file path (required)'
+                                    description: cropDescriptions.batchOutputPath
                                 },
                                 x1: {
                                     type: 'integer',
-                                    description: 'Crop region top-left X coordinate (0-1000)'
+                                    description: cropDescriptions.batchX1
                                 },
                                 y1: {
                                     type: 'integer',
-                                    description: 'Crop region top-left Y coordinate (0-1000)'
+                                    description: cropDescriptions.batchY1
                                 },
                                 x2: {
                                     type: 'integer',
-                                    description: 'Crop region bottom-right X coordinate (0-1000)'
+                                    description: cropDescriptions.batchX2
                                 },
                                 y2: {
                                     type: 'integer',
-                                    description: 'Crop region bottom-right Y coordinate (0-1000)'
+                                    description: cropDescriptions.batchY2
                                 }
                             },
                             required: ['image_path', 'output_path', 'x1', 'y1', 'x2', 'y2']
@@ -482,39 +405,27 @@ export function createCropImageTool(maxBatchTasks: number = 10, defaultOptions?:
                     // 单张模式参数（向后兼容）
                     image_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Source image path (required). Use "workspace_name/path" format.'
-                            : 'Single mode: Source image path (required). Relative to workspace.'
+                        description: cropDescriptions.singleImagePath
                     },
                     output_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Output file path (required). Use "workspace_name/path" format.'
-                            : 'Single mode: Output file path (required).'
+                        description: cropDescriptions.singleOutputPath
                     },
                     x1: {
                         type: 'integer',
-                        description: useNormalized
-                            ? 'Single mode: Crop region top-left X coordinate (0-1000, required)'
-                            : 'Single mode: Crop region top-left X coordinate (pixels, required)'
+                        description: cropDescriptions.singleX1
                     },
                     y1: {
                         type: 'integer',
-                        description: useNormalized
-                            ? 'Single mode: Crop region top-left Y coordinate (0-1000, required)'
-                            : 'Single mode: Crop region top-left Y coordinate (pixels, required)'
+                        description: cropDescriptions.singleY1
                     },
                     x2: {
                         type: 'integer',
-                        description: useNormalized
-                            ? 'Single mode: Crop region bottom-right X coordinate (0-1000, required)'
-                            : 'Single mode: Crop region bottom-right X coordinate (pixels, required)'
+                        description: cropDescriptions.singleX2
                     },
                     y2: {
                         type: 'integer',
-                        description: useNormalized
-                            ? 'Single mode: Crop region bottom-right Y coordinate (0-1000, required)'
-                            : 'Single mode: Crop region bottom-right Y coordinate (pixels, required)'
+                        description: cropDescriptions.singleY2
                     }
                 }
             }

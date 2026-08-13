@@ -8,7 +8,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import type { Tool, ToolContext, ToolResult, MultimodalData, MultimodalCapability } from '../types';
-import { t } from '../../i18n';
+import { parseArgs } from '../types';
+import { t, getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+import { buildReadFileDescriptions } from '../localization/dynamicDescriptions';
 import { Logger } from '../../core/logger';
 import {
     resolveUri,
@@ -35,9 +38,8 @@ import {
 } from '../utils';
 import { ensureOutsideWorkspaceAccessApproved } from './outsideWorkspaceAccess';
 
-// 文件大小护栏（与 search_in_files 的 5MB 默认上限一致）：
-// 超大文件全量读入并全量塞进模型上下文会导致内存与 token 爆炸。
-const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
+// 文件大小护栏（与 search_in_files 的 5MB 默认上限一致）已统一收敛到 shared/fileSizeGuards
+import { MAX_READ_FILE_BYTES } from '../shared/fileSizeGuards';
 
 // 批量读取护栏：单次调用最多 20 个文件，且累计字节预算 50MB，
 // 防止一次批量读取把任意多个文件同时载入内存导致内存暴涨。
@@ -46,6 +48,19 @@ const MAX_BATCH_TOTAL_BYTES = 50 * 1024 * 1024;
 
 /** 批量读取并发上限（与 list_files 的行数统计一致，避免一次读大量文件时并发无界） */
 const BATCH_READ_CONCURRENCY = 8;
+
+/**
+ * 批量 files 条数上限（发现 16）：超出截断并在结果中置 truncated。
+ * 与 get_symbols 的 MAX_SYMBOL_PATHS = 20 同口径——单文件 5MB 护栏挡不住
+ * 批量路径的累计爆炸（50 张图 × 5MB ≈ 250MB base64 一次性读入内存）。
+ */
+const MAX_BATCH_FILES = 20;
+
+/**
+ * 多模态附件累计字节上限（原始字节，base64 编码前）：超出后不再追加 inlineData 附件，
+ * 并在结果中置 truncated/multimodalTruncated，让模型知道附件被截断。
+ */
+const MAX_BATCH_MULTIMODAL_BYTES = 24 * 1024 * 1024;
 
 const log = Logger.get('ReadFileTool');
 
@@ -69,6 +84,43 @@ interface FileReadRequest {
 interface ResolvedLineRangeArgs {
     startLine?: number;
     endLine?: number;
+}
+
+/**
+ * 批量读取的单个文件条目（对应 schema 的 files[] 元素）。
+ */
+interface ReadFileBatchItem {
+    path: string;
+    startLine?: number;
+    endLine?: number;
+}
+
+/**
+ * read_file 的规范化参数形状（含 compat 透传的行范围别名）。
+ */
+interface ReadFileArgs {
+    path?: string;
+    files?: ReadFileBatchItem[];
+    startLine?: number;
+    endLine?: number;
+    // 兼容透传参数（不向模型宣传，由 handler 解释语义）
+    line?: number;
+    maxLine?: number;
+    maxLines?: number;
+    limit?: number;
+}
+
+/**
+ * 行范围参数的公共形状：resolveLineRangeArgs 只关心这些字段，
+ * 既接受顶层参数也接受 files[] 条目。
+ */
+interface ReadFileLineRangeArgs {
+    startLine?: unknown;
+    endLine?: unknown;
+    line?: unknown;
+    maxLine?: unknown;
+    maxLines?: unknown;
+    limit?: unknown;
 }
 
 /**
@@ -129,7 +181,7 @@ function normalizeLineNumber(value: unknown): number | undefined {
         : undefined;
 }
 
-function resolveLineRangeArgs(args: Record<string, unknown>): ResolvedLineRangeArgs {
+function resolveLineRangeArgs(args: ReadFileLineRangeArgs): ResolvedLineRangeArgs {
     // 修改原因：模型经常按其他文件读取工具的习惯传 line/maxLines/limit，而 read_file 原本只接受 startLine/endLine，会被 strict schema 直接拒绝。
     // 修改方式：保留 startLine/endLine 作为规范字段，同时把 line/maxLine/maxLines/limit 收敛为同一个 LineRange 语义。
     // 修改目的：提高工具调用容错率，并让“读取第 N 行”或“读取最多 N 行”的自然表达无需失败后重试。
@@ -379,52 +431,23 @@ export function createReadFileTool(
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
     
-    // 根据多模态配置和渠道类型生成不同的工具描述
-    let description: string;
-    
-    // 行号格式说明
-    const lineNumberNote = '\n\n说明：读取文本文件时，返回内容会带行号前缀（例如 "   1 | code here"）。这些数字和 "|" 只是定位标记，不属于文件正文；编辑文件时不要把它们写回去。';
-    
-    // 行范围说明。
-    // 单文件兼容别名（line/maxLine/maxLines/limit）不再写进描述和 schema 向模型宣传：
-    // 每轮请求都会携带工具声明，别名参数既烧 token 又鼓励旧写法。
-    // 它们仍通过 declaration 的 paramAliases/compatParams 被接受（见下方声明）。
-    const lineRangeNote = '\n\n行范围：单文件读取时使用顶层 startLine/endLine；批量读取时在每个 files[] 项中分别设置 startLine/endLine。只有已经知道准确行号时才填写（例如来自 get_symbols、goto_definition、find_references、list_files、find_files 或之前 read_file 的结果）。不要猜行号；不确定时不要填写行范围，先读取完整文件或使用搜索工具定位。';
+    // 语言感知说明：根据当前实际界面语言（zh-CN/en/ja）生成模型可见说明。
+    // 顶层说明（多模态四分支、行号/行范围说明、多根尾巴）与 path/files 等参数说明
+    // 统一由 localization/dynamicDescriptions 的语言感知生成器负责（目录只覆盖参数，
+    // 不覆盖动态顶层说明），避免静态文本覆盖掉运行时动态信息。
+    const lang = resolveLocalizationLanguage(getActualLanguage());
+    const readFileDescriptions = buildReadFileDescriptions({
+        lang,
+        multimodalEnabled,
+        channelType,
+        toolMode,
+        isMultiRoot,
+        workspaceNames: workspaces.map(w => w.name)
+    });
 
-    // 多模态/二进制行范围限制说明（多模态开启时强调）
-    const lineRangeBinaryRestrictionNote =
-        '\n\n重要：startLine/endLine 只适用于文本文件。读取图片、PDF、音频、视频或其他二进制/多模态文件时无需填写行范围；即使误填，工具也会忽略这些行范围参数。';
-    
-    if (!multimodalEnabled) {
-        // 未启用多模态时，只支持文本文件
-        description = '读取工作区中的一个或多个文件。当前支持类型：文本文件。' + lineNumberNote + lineRangeNote;
-    } else if (channelType === 'openai') {
-        // OpenAI 格式有特殊限制
-        if (toolMode === 'function_call') {
-            // OpenAI function_call 模式不支持多模态
-            description = '读取工作区中的一个或多个文件。当前支持类型：文本文件。' + lineNumberNote + lineRangeNote;
-        } else {
-            // OpenAI xml/json 模式只支持图片
-            description = '读取工作区中的一个或多个文件。当前支持类型：文本文件、图片（PNG/JPEG/WebP）。图片会作为多模态数据返回。' + lineNumberNote + lineRangeNote + lineRangeBinaryRestrictionNote;
-        }
-    } else {
-        // Gemini 和 Anthropic 全面支持
-        description = '读取工作区中的一个或多个文件。当前支持类型：文本文件、图片（PNG/JPEG/WebP）、文档（PDF）。图片和文档会作为多模态数据返回。' + lineNumberNote + lineRangeNote + lineRangeBinaryRestrictionNote;
-    }
-    
-    // 多工作区说明
-    if (isMultiRoot) {
-        description += '\n\n多根工作区：path 与 files[].path 必须使用 "workspace_name/path" 格式来指定工作区。';
-    }
-    
-    // 路径参数描述
-    let pathDescription = '单文件读取时使用。要读取的文件路径，相对于当前工作区根目录。例如：src/main.ts。';
-    if (isMultiRoot) {
-        pathDescription = `单文件读取时使用。当前是多根工作区，必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`;
-    }
-    const batchPathDescription = isMultiRoot
-        ? `批量读取的文件路径。必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`
-        : '批量读取的文件路径，相对于当前工作区根目录。例如：src/main.ts。';
+    const description = readFileDescriptions.description;
+    const pathDescription = readFileDescriptions.path;
+    const batchPathDescription = readFileDescriptions.batchPath;
     
     return {
         declaration: {
@@ -447,7 +470,7 @@ export function createReadFileTool(
                     },
                     files: {
                         type: 'array',
-                        description: '批量读取时使用。每个文件可以分别指定文本行范围；不要与顶层 path/startLine/endLine 同时使用。',
+                        description: readFileDescriptions.files,
                         items: {
                             type: 'object',
                             properties: {
@@ -458,12 +481,12 @@ export function createReadFileTool(
                                 startLine: {
                                     type: 'integer',
                                     minimum: 1,
-                                    description: '该文本文件的起始行号，1-based，包含该行。非文本文件会忽略。'
+                                    description: readFileDescriptions.batchStartLine
                                 },
                                 endLine: {
                                     type: 'integer',
                                     minimum: 1,
-                                    description: '该文本文件的结束行号，1-based，包含该行。非文本文件会忽略。'
+                                    description: readFileDescriptions.batchEndLine
                                 }
                             },
                             required: ['path']
@@ -472,12 +495,12 @@ export function createReadFileTool(
                     startLine: {
                         type: 'integer',
                         minimum: 1,
-                        description: '起始行号，1-based，包含该行。仅文本文件可用。读取图片/PDF 等非文本文件时会被忽略。指定后从该行读取到文件末尾，或读取到 endLine。'
+                        description: readFileDescriptions.startLine
                     },
                     endLine: {
                         type: 'integer',
                         minimum: 1,
-                        description: '结束行号，1-based，包含该行。仅文本文件可用。读取图片/PDF 等非文本文件时会被忽略。未指定 startLine 时，从文件开头读取到该行。'
+                        description: readFileDescriptions.endLine
                     }
                 }
             }
@@ -489,6 +512,9 @@ export function createReadFileTool(
             if (accessError) {
                 return { success: false, error: accessError };
             }
+
+            // 上游已 normalizeToolArgs + validateToolArgs 校验，这里仅做编译期类型收窄
+            const typed = parseArgs<ReadFileArgs>(args);
 
             // 从 context 中获取多模态能力
             const multimodalEnabled = context?.multimodalEnabled === true;
@@ -508,11 +534,17 @@ export function createReadFileTool(
                 ? context.multimodalDebug as Record<string, unknown>
                 : undefined;
             
-            const hasSinglePath = typeof args.path === 'string' && args.path.trim() !== '';
-            const batchFiles = Array.isArray(args.files) ? args.files : undefined;
+            const hasSinglePath = typeof typed.path === 'string' && typed.path.trim() !== '';
+            let batchFiles = Array.isArray(typed.files) ? typed.files : undefined;
             // 某些 function-calling 客户端会把未提供的可选数组补成 []。当 path 有值时，
             // 空 files 应视为“未提供批量参数”，不能误判成单双模式冲突。
             const hasBatchFiles = !!batchFiles && batchFiles.length > 0;
+
+            // 批量条数上限（发现 16）：超出截断并在结果中置 truncated 标记
+            const batchFilesTruncated = !!batchFiles && batchFiles.length > MAX_BATCH_FILES;
+            if (batchFilesTruncated && batchFiles) {
+                batchFiles = batchFiles.slice(0, MAX_BATCH_FILES);
+            }
 
             if (hasSinglePath && hasBatchFiles) {
                 return { success: false, error: 'Provide either path or files, not both.' };
@@ -525,15 +557,15 @@ export function createReadFileTool(
             }
 
             let fileRequests: FileReadRequest[];
-            if (hasBatchFiles) {
-                fileRequests = (batchFiles as Array<Record<string, unknown>>).map(file => ({
+            if (hasBatchFiles && batchFiles) {
+                fileRequests = batchFiles.map(file => ({
                     path: typeof file.path === 'string' ? file.path : '',
                     ...resolveLineRangeArgs(file)
                 }));
             } else {
-                const resolvedLineRange = resolveLineRangeArgs(args);
+                const resolvedLineRange = resolveLineRangeArgs(typed);
                 fileRequests = [{
-                    path: args.path as string,
+                    path: typed.path as string,
                     startLine: resolvedLineRange.startLine,
                     endLine: resolvedLineRange.endLine
                 }];
@@ -556,6 +588,8 @@ export function createReadFileTool(
             const allMultimodal: MultimodalData[] = [];
             let successCount = 0;
             let failCount = 0;
+            let multimodalBytes = 0;
+            let multimodalTruncated = false;
 
             // 批量读取总字节预算：先取 stat 累计大小，超限直接报错
             let totalBatchBytes = 0;
@@ -613,7 +647,15 @@ export function createReadFileTool(
                 if (result.success) {
                     successCount++;
                     if (multimodal) {
-                        allMultimodal.push(...multimodal);
+                        // 多模态附件累计字节上限（发现 16）：条数上限之外再加累计护栏，
+                        // 超限附件不再追加进 inlineData（文本结果仍保留），并标记截断。
+                        const size = typeof result.size === 'number' ? result.size : 0;
+                        if (multimodalBytes + size > MAX_BATCH_MULTIMODAL_BYTES) {
+                            multimodalTruncated = true;
+                        } else {
+                            multimodalBytes += size;
+                            allMultimodal.push(...multimodal);
+                        }
                     }
                 } else {
                     failCount++;
@@ -628,7 +670,10 @@ export function createReadFileTool(
                     successCount,
                     failCount,
                     totalCount: fileRequests.length,
-                    multiRoot: isMultiRoot
+                    multiRoot: isMultiRoot,
+                    // 发现 16：files 超条数上限或多模态附件超累计字节上限时置位
+                    truncated: batchFilesTruncated || multimodalTruncated,
+                    multimodalTruncated
                 },
                 multimodal: allMultimodal.length > 0 ? allMultimodal : undefined,
                 error: allSuccess ? undefined : `${failCount} file${failCount === 1 ? '' : 's'} failed to read`

@@ -114,16 +114,37 @@ export class DependencyManager {
     /**
      * 获取单例实例
      *
-     * @param context VSCode 扩展上下文（首次调用时必须提供）
-     * @param customDepsPath 自定义依赖安装目录（可选）
+     * @param context VSCode 扩展上下文（首次创建或需要重建时必须提供）
+     * @param customDepsPath 自定义依赖安装目录（可选；显式传入且与当前实例目录不一致时触发重建）
      */
     static getInstance(context?: vscode.ExtensionContext, customDepsPath?: string): DependencyManager {
-        if (!DependencyManager.instance) {
+        const current = DependencyManager.instance;
+
+        // 存储路径切换检测：单例首次创建后，若后续显式传入的 customDepsPath 与当前实例
+        // 的 graycodeDir 不一致，重建实例，使依赖重新安装到新目录，避免与新存储布局分叉。
+        // 仅在显式传入 customDepsPath 时比较（getSharp 等无参调用必须复用现有实例）。
+        const needsRebuild = current
+            && customDepsPath !== undefined
+            && customDepsPath !== current.graycodeDir;
+
+        if (needsRebuild) {
+            if (!context) {
+                // 需要重建但未提供 context：构造函数依赖 ExtensionContext，无法安全重建。
+                // 选择抛错（fail fast）而非静默沿用旧实例——沿用会把依赖继续装进旧目录，
+                // 正是本修复要消除的静默分叉；正常调用方（bootstrap 的 initDependencies）
+                // 重建时总是携带 context。
+                throw new Error(t('modules.dependencies.errors.requiresContext'));
+            }
+            // 重建会丢失 progressListeners 与 loadedModules 缓存：这是可接受的取舍——
+            // 重建场景是存储路径切换，旧目录的监听器与模块缓存本就应随目录一起作废。
+            DependencyManager.instance = new DependencyManager(context, customDepsPath);
+        } else if (!current) {
             if (!context) {
                 throw new Error(t('modules.dependencies.errors.requiresContext'));
             }
             DependencyManager.instance = new DependencyManager(context, customDepsPath);
         }
+
         return DependencyManager.instance;
     }
     
@@ -360,15 +381,20 @@ export class DependencyManager {
                 message: t('modules.dependencies.progress.downloading', { name })
             });
             
-            // 使用 npm 安装（execFile 参数数组直传，不经 shell 解析，消除路径注入面；
-            // maxBuffer 放大到 64MB：npm 输出较多时不会被默认 1MB 上限误杀）
+            // 使用 npm 安装
+            // argv 数组直传（execFile 不经过 shell）：tempDir 来自可配置存储路径，
+            // 字符串拼接进 shell 命令会受引号/$()/& 等特殊字符影响（注入面/命令异常）；
+            // Windows 上 npm 实际是 npm.cmd，execFile 不经过 shell 也能解析 .cmd 启动器。
+            // maxBuffer 放大到 64MB：npm 输出较多时不会被默认 1MB 上限误杀
+            const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
             const { stdout, stderr } = await execFile(
-                'npm',
+                npmCommand,
                 ['install', '--prefix', tempDir, '--no-save'],
                 {
                     cwd: tempDir,
                     timeout: 300000,  // 5分钟超时
-                    maxBuffer: 64 * 1024 * 1024
+                    maxBuffer: 64 * 1024 * 1024,
+                    windowsHide: true
                 }
             );
             

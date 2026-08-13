@@ -29,7 +29,67 @@
 
 import { EventEmitter } from 'events';
 import { t } from '../i18n';
+import { agentMailbox } from '../core/services/agentMailbox';
 import { generatePrefixedId } from './shared/idGen';
+
+function nonEmptyString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * 后台 SubAgent 的完整结果必须先进入后端 claim/ack 通道，taskEvent 只做 UI 展示与唤醒。
+ * 这样 Webview 尚未打开或切换会话时，终态事件即使没有观察者也不会丢失结果。
+ */
+function enqueueBackgroundSubAgentResult(
+    task: TaskInfo,
+    status: 'completed' | 'cancelled' | 'error',
+    data: Record<string, unknown>
+): boolean {
+    const metadata = task.metadata ?? {};
+    const conversationId = nonEmptyString(data.conversationId) ?? nonEmptyString(metadata.conversationId);
+    const runId = nonEmptyString(data.runId) ?? nonEmptyString(metadata.runId) ?? task.id;
+    const agentName = nonEmptyString(data.agentName) ?? nonEmptyString(metadata.agentName) ?? 'Sub-agent';
+    if (!conversationId) return false;
+
+    const lines = [`Task: sub-agent "${agentName}" (runId: ${runId})`];
+    const statusText = status === 'completed'
+        ? 'success'
+        : status === 'cancelled' ? 'cancelled by user' : 'failed';
+    const statusMetadata: string[] = [];
+    if (typeof data.steps === 'number' && data.steps > 0) {
+        statusMetadata.push(`${data.steps} steps`);
+    }
+    if (Array.isArray(data.toolsUsed)) {
+        const toolsUsed = data.toolsUsed.filter((tool): tool is string => typeof tool === 'string');
+        statusMetadata.push(toolsUsed.length > 0 ? `tools: ${toolsUsed.join(', ')}` : 'tools: none');
+    }
+    const durationSeconds = Math.max(0, Math.round((Date.now() - task.startTime) / 1000));
+    statusMetadata.push(`${durationSeconds}s`);
+    lines.push(`Status: ${statusText}${statusMetadata.length > 0 ? ` (${statusMetadata.join(', ')})` : ''}`);
+
+    const error = nonEmptyString(data.error);
+    if (error) lines.push(`Error: ${error}`);
+    const response = nonEmptyString(data.response);
+    if (response) {
+        lines.push('Result:', response);
+    } else {
+        lines.push('Open Monitor to view full transcript.');
+    }
+
+    const stableMessageId = `background-task:${task.id}`;
+    const result = agentMailbox.enqueueMainSessionSystemMessage({
+        conversationId,
+        messageId: stableMessageId,
+        threadId: stableMessageId,
+        fromRunId: runId,
+        fromAgentName: agentName,
+        text: `[Background task completed]\n\n${lines.join('\n')}`
+    });
+    if (!result.success) {
+        console.warn('[TaskManager] Failed to enqueue background SubAgent result:', result.error);
+    }
+    return result.success;
+}
 
 /**
  * 任务类型
@@ -40,12 +100,13 @@ import { generatePrefixedId } from './shared/idGen';
  * - 'background_subagent'  后台 SubAgent 任务（backend/tools/subagents/subagents.ts、detachedTaskBridge.ts）
  * - 'agent_message'        agent_send_message 入队轻量通知（backend/tools/subagents/agentSendMessage.ts；
  *                          emitEvent 直发，不注册任务）
- * - 'crop_image' / 'remove_background' / 'resize_image' / 'rotate_image'
+* - 'crop_image' / 'remove_background' / 'resize_image' / 'rotate_image'
  *                          图像批处理（backend/tools/media/）
  *
- * 保留 `| string` 兜底：注册表对运行期自定义类型开放，新增任务类型无需改此处声明。
+ * 显式联合（去掉 `| string` 兜底）：新增任务类型时需显式扩展本声明，
+ * 编译期即可捕获 `taskEvent:${taskType}` 事件名与 type 比较中的拼写错误。
  */
-export type TaskType = 'terminal' | 'image_generation' | 'background_subagent' | 'agent_message' | 'crop_image' | 'remove_background' | 'resize_image' | 'rotate_image' | string;
+export type TaskType = 'terminal' | 'image_generation' | 'background_subagent' | 'agent_message' | 'crop_image' | 'remove_background' | 'resize_image' | 'rotate_image';
 
 /**
  * 任务状态
@@ -141,6 +202,12 @@ class TaskManagerClass {
         abortController: AbortController,
         metadata?: Record<string, unknown>
     ): void {
+        // 同 ID 重复注册通常是调用方生命周期错误（旧任务未注销就重注册同名任务），
+        // 新条目会覆盖旧条目的 abortController，导致旧任务无法再被取消；告警留痕便于排查。
+        if (this.activeTasks.has(id)) {
+            console.warn(`[TaskManager] Duplicate task registration for id "${id}" (type: ${type}); the previous entry will be overwritten.`);
+        }
+
         const taskInfo: TaskInfo = {
             id,
             type,
@@ -190,12 +257,19 @@ class TaskManagerClass {
         const eventType: TaskEventType = status === 'completed' ? 'complete' 
             : status === 'cancelled' ? 'cancelled' 
             : 'error';
+
+        const terminalData: Record<string, unknown> = { ...(data ?? {}) };
+        if (task.type === 'background_subagent' && enqueueBackgroundSubAgentResult(task, status, terminalData)) {
+            // 前端据此只更新任务条，不再走旧的 background_task 回执；真正的交付由
+            // agentMailbox claim -> conversation.addMessage -> acknowledge 保证。
+            terminalData.delivery = 'agent_mailbox';
+        }
         
         this.emitEvent({
             taskId: id,
             taskType: task.type,
             type: eventType,
-            data
+            data: Object.keys(terminalData).length > 0 ? terminalData : undefined
         });
     }
     

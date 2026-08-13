@@ -1,20 +1,45 @@
 /**
- * StreamChunkProcessor 视图缺失场景回归测试。
+ * 包含两组 StreamChunkProcessor 回归测试：
  *
- * 覆盖：
- * 1. 正常路径（视图存在）：chunk/终结事件按 streamChunk 格式送达，顺序不变；
- * 2. H6 中止语义：视图缺失（面板关闭/重载）时 chunk 与终结事件一律不可投递，
- *    返回 false；消费方经 isViewUnreachable() 中止后端生成（暂存补发机制已移除，
- *    前端会话状态由后端会话数据重建）；
- * 3. 无 view 时 flush() 清空 messageBuffer，防止缓冲滞留内存；
- * 4. viewEverReachable 语义：从未有视图的流（后台任务）isViewUnreachable() 恒 false，
- *    保持既有继续消费语义。
+ * 1. 视图缺失场景回归测试（桌面 H6 中止语义）：
+ *    - 正常路径（视图存在）：chunk/终结事件按 streamChunk 格式送达，顺序不变；
+ *    - H6 中止语义：视图缺失（面板关闭/重载）时 chunk 与终结事件一律不可投递，
+ *      返回 false；消费方经 isViewUnreachable() 中止后端生成（暂存补发机制已移除，
+ *      前端会话状态由后端会话数据重建）；
+ *    - 无 view 时 flush() 清空 messageBuffer，防止缓冲滞留内存；
+ *    - viewEverReachable 语义：从未有视图的流（后台任务）isViewUnreachable() 恒 false，
+ *      保持既有继续消费语义。
+ * 2. processChunk 增量类型判定回归测试：
+ *    - 对象增量（主路径，回归保护）
+ *    - 字符串/空串增量（兼容路径，修复 16 的初衷：空串合法）
+ *    - 未知类型（应丢弃）
  */
 
 import { StreamChunkProcessor } from '../../../webview/stream/StreamChunkProcessor';
+import { PUSH_MESSAGE_NAMES } from '../../../shared/protocol';
+
+jest.mock('../../modules/activity', () => ({
+    markAiActive: jest.fn(),
+}));
 
 interface ViewRef {
   current: { webview: { postMessage: jest.Mock } } | undefined;
+}
+
+function createProcessor(): { processor: StreamChunkProcessor; postMessage: jest.Mock } {
+    const postMessage = jest.fn().mockReturnValue(true);
+    const processor = new StreamChunkProcessor(
+        () => ({ webview: { postMessage } as any }),
+        'conv-1',
+        'stream-1'
+    );
+    return { processor, postMessage };
+}
+
+function lastPosted(postMessage: jest.Mock): any {
+    expect(postMessage).toHaveBeenCalled();
+    const calls = postMessage.mock.calls;
+    return calls[calls.length - 1][0];
 }
 
 describe('StreamChunkProcessor - 视图缺失时 H6 中止语义', () => {
@@ -178,4 +203,99 @@ describe('StreamChunkProcessor - 视图缺失时 H6 中止语义', () => {
     expect(postMessage.mock.calls[1][0].data).toMatchObject({ type: 'chunk', chunk: 'second' });
     expect(postMessage.mock.calls[2][0].data).toMatchObject({ type: 'cancelled', content: 'partial' });
   });
+});
+
+describe('StreamChunkProcessor.processChunk 增量类型判定', () => {
+    afterEach(() => {
+        jest.clearAllMocks();
+    });
+
+    test('对象增量 { chunk: { delta } } 应发送（回归：2c93ad4e 曾把对象增量丢进 unknown）', () => {
+        const { processor, postMessage } = createProcessor();
+        const isError = processor.processChunk({
+            conversationId: 'conv-1',
+            streamId: 'stream-1',
+            type: 'chunk',
+            chunk: { delta: [{ text: 'hello' }], done: false },
+            createdAt: 1,
+        });
+        expect(isError).toBe(false);
+        const msg = lastPosted(postMessage);
+        expect(msg.type).toBe(PUSH_MESSAGE_NAMES.streamChunk);
+        expect(msg.data.type).toBe('chunk');
+        expect(msg.data.conversationId).toBe('conv-1');
+        expect(msg.data.streamId).toBe('stream-1');
+        // 对象原样透传（前端 handleChunkType 读 chunk.chunk.delta）
+        expect(msg.data.chunk).toEqual({ delta: [{ text: 'hello' }], done: false });
+    });
+
+    test('空数组增量 { chunk: { delta: [] } } 应发送', () => {
+        const { processor, postMessage } = createProcessor();
+        processor.processChunk({
+            conversationId: 'conv-1',
+            streamId: 'stream-1',
+            type: 'chunk',
+            chunk: { delta: [], done: false },
+            createdAt: 1,
+        });
+        expect(postMessage).toHaveBeenCalled();
+    });
+
+    test('字符串增量 { chunk: "text" } 应发送（兼容路径）', () => {
+        const { processor, postMessage } = createProcessor();
+        processor.processChunk({
+            conversationId: 'conv-1',
+            streamId: 'stream-1',
+            type: 'chunk',
+            chunk: 'hi',
+            createdAt: 1,
+        });
+        const msg = lastPosted(postMessage);
+        expect(msg.data.type).toBe('chunk');
+        expect(msg.data.chunk).toBe('hi');
+    });
+
+    test('空字符串增量 { chunk: "" } 应发送（修复 16 初衷：空串合法，不落 unknown）', () => {
+        const { processor, postMessage } = createProcessor();
+        processor.processChunk({
+            conversationId: 'conv-1',
+            streamId: 'stream-1',
+            type: 'chunk',
+            chunk: '',
+            createdAt: 1,
+        });
+        const msg = lastPosted(postMessage);
+        expect(msg.data.type).toBe('chunk');
+        expect(msg.data.chunk).toBe('');
+    });
+
+    test('complete（content 对象）走 complete 分支并立即发送', () => {
+        const { processor, postMessage } = createProcessor();
+        processor.processChunk({
+            conversationId: 'conv-1',
+            streamId: 'stream-1',
+            type: 'complete',
+            content: { id: 'm1', parts: [{ text: 'final' }] },
+            createdAt: 1,
+        });
+        const msg = lastPosted(postMessage);
+        expect(msg.data.type).toBe('complete');
+        expect(msg.data.content).toEqual({ id: 'm1', parts: [{ text: 'final' }] });
+    });
+
+    test('未知类型不发送、不抛错', () => {
+        const { processor, postMessage } = createProcessor();
+        const isError = processor.processChunk({ foo: 'bar' });
+        expect(isError).toBe(false);
+        expect(postMessage).not.toHaveBeenCalled();
+    });
+
+    test('视图不可达时不发送并返回 false（isViewUnreachable 命中）', () => {
+        const processor = new StreamChunkProcessor(() => undefined, 'conv-1', 'stream-1');
+        const isError = processor.processChunk({
+            chunk: { delta: [{ text: 'a' }], done: false },
+        });
+        expect(isError).toBe(false);
+        expect(processor.isViewUnreachable()).toBe(true);
+    });
 });

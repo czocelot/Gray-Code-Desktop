@@ -35,6 +35,16 @@
   - **修复后台任务取消「按不动」**：① 后端 TaskManager.cancelTask 增加强制终态兜底——abort 后若底层执行（未及时响应 abort 的长 LLM/命令调用）2s 内未走 unregisterTask 收敛，强制按 cancelled 注销并推送事件，任务条不再长期停在 running；② 前端取消按钮乐观反馈——点击即转圈（cancelling 态、防重复点击），取消失败（任务不存在等）回滚标记并 toast 提示；③ i18n 三语新增 components.backgroundTasks.cancelling。
   - **修复 UI 不透明度在编辑窗口（及暗色主题下全局）不生效**：color-mix 内的 var() 在 Chromium 按「定义点」解析（非惰性），:root 里定义的 --gc-surface-* 在 CSS 加载时锁定 --gc-ui-opacity=1，运行时调低不透明度不会重算表面色；现 App.vue 设置 --gc-ui-opacity 时同步用当前主题基础色显式重算 --gc-surface-*（内联覆盖），FileEditorPage 背景改为伪元素 + opacity: var(--gc-ui-opacity)（惰性解析实时跟随），文字/图标保持全不透明。
 
+
+### Merged：合入上游 main 至 067f9693（70 commits——schema 类型化收敛/巨型文件拆分/agent-sweep 批次/DeepSeek reasoning 回传/双语 README；fast-tavern 与 nightly 相关本批无新内容）
+  - **合入范围**：e42da40d..067f9693 全部 70 个 commits（上游 main 分支）。本地保持独立 1.7.x 版本体系与独立桌面前端，上游 1.5.x 版本小节不并入本地 CHANGELOG（沿用既有约定）；nightly 更新渠道与 fast-tavern 子项目按项目决策不采纳。
+  - **refactor（1a72e9d6/e73e966b/3846bd55）**：工具/渠道/前端配置/协议 schema 类型化收敛（ToolArgs 改 Record<string, unknown> + parseArgs 收窄）；后端模块与前端组件巨型文件职责拆分（ChannelManager 拆出 channelManager/proxyFetch/streamAccumulator/tokenCount 子模块、PromptManager 拆出 pinnedFiles/contextSections/templatePlaceholders/textUtils/ignorePatterns、BranchService 拆分至 branch*/ 系列服务、SummarizeService 轮内截断等）；测试断言同步。
+  - **agent-sweep 批次（690726db/6fabad84/0e646faa/2c93ad4e/9df2e804）**：proxyFetch chunked 真实校验、MemoryManager 删除计数、设置事件深拷贝、i18n 迁移、retry 配置校验、品牌名清理、TaskManager 周期清扫、search skippedFiles、LSP 白名单、diff 终态收敛、replacePass 计数、schema integer、auto 语言崩溃、AutoExec 分类、附件上限、批量 i18n、store 方法化、IPC 并行、reroll/editBranch abort 保护、CSP、NON_BLOCKING、消息常量、错误边界统一、PR CI、lock 修复、toast 转义、CRLF 归一化、release 优化等 80+ 项。
+  - **fix(channel)（652e951e）**：DeepSeek Responses reasoning_text 回传丢失与 usage 锚点对齐（本地此前已修复同源问题，合并后采用上游双开关实现 sendHistoryThoughts/sendHistoryThoughtSignatures）。
+  - **fix（4701b973/c5878930 等）**：单轮长工具回合自动总结支持轮内截断；设置面板新增模型后输入区/任务卡/工具面板下拉框实时刷新；后台结果领取与用户发送接管窗口竞态；checkpoint 部分快照恢复误删语义修复；子代理后台任务结果可靠写入与按终态立即结算；同一用户回合批次前存档只创建一次；工具执行存档按模型参数涉及文件构建部分快照；Win11 24H2/25H2 toast 点击激活失效改驻留进程内 Activated（toast-linger.exe 12KB）；消息列表虚拟窗口 200 行滑动窗口。
+  - **fix(file-lock)（83e2abbe/99018846/0326cd1a）**：锁 key realpath 归一 + 大小写折叠对齐 win32/darwin + 卷大小写回归修复；write_file 新文件预创建残留安全收敛（#38/#39/#40 回归修复）。
+  - **docs（79accc69/7dff1ff2/f80600f1/54e1cdcb/c1b38805）**：双语 README 重排 + 贡献指南 + 鸣谢章节（1b0t3、czocelot、NebulaRaven）。
+  - **冲突解决要点**：UpdateChecker/ChannelManager/proxyFetch/设置/记忆等桌面独有改造保留本地实现；media 工具 readImageFile 收敛到 imageUtils 共享版（含 displayName 审批文案）；memory 配置补上游 partChars/partLines 输出分页字段（默认 20000/500，设置页同步）；PromptManager 固定文件缓存接入上游 pinnedFiles 模块；BranchService/SummarizeService/ToolIterationLoopService 按上游拆分结构补齐委托与导入；getUpdateSettings 适配本地无 updateChannel 的 GlobalSettings；上游 1.5.x 版本小节不并入本地版本体系；nightly 工作流（nightly-build.yml/release.yml/ci.yml）与 fast-tavern 子项目不采纳。
 ## [1.7.16] - 2026-08-12
 
 ### Added：自动更新面板可选下载版本（auto / 便携版 / 安装版）

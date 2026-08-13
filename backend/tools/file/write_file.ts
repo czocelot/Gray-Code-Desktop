@@ -9,16 +9,27 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { Tool, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { resolveFileToolPathWithInfo, getAllWorkspaces, normalizeLineEndingsToLF } from '../utils';
 import { getDiffManager } from '../../core/services/diffManager';
-import { getDiffStorageManager } from '../../modules/conversation';
 import { ensureOutsideWorkspaceAccessApproved } from './outsideWorkspaceAccess';
+import { resolveDiffOutcome } from './diff/resolveDiffOutcome';
 import { fileWriteLockManager, type LockHolder } from '../../core/fileWriteLockManager';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
 
 /**
  * 单个文件写入配置
  */
 interface WriteFileEntry {
+    path: string;
+    content: string;
+}
+
+/**
+ * write_file 的规范化参数形状。
+ */
+interface WriteFileArgs {
     path: string;
     content: string;
 }
@@ -44,6 +55,8 @@ interface WriteResult {
      * 目的：让自动确认失败能明确显示原因，同时不再卡住等待链路。
      */
     autoSaveError?: string;
+    /** 新文件拒绝/取消后残留清理失败原因 */
+    cleanupError?: string;
     /** Pending diff ID，用于确认/拒绝（历史字段，尽量避免再依赖） */
     pendingDiffId?: string;
 }
@@ -89,6 +102,7 @@ async function writeSingleFile(
         // 检查文件是否存在并获取原始内容
         let originalContent = '';
         let fileExists = false;
+        let newFileCreatedDirectoryRoot: string | undefined;
         
         try {
             await vscode.workspace.fs.stat(uri);
@@ -129,9 +143,11 @@ async function writeSingleFile(
         // 如果文件不存在，需要先创建目录
         // 异步 IO：避免在 extension host 主线程上做同步磁盘操作；
         // mkdir recursive 幂等，无需先 existsSync 探测
-            if (!fileExists) {
+        if (!fileExists) {
             const dirPath = path.dirname(absolutePath);
-            await fs.promises.mkdir(dirPath, { recursive: true });
+            // recursive mkdir 会返回本次创建的最高层目录；把该安全边界交给 DiffManager，
+            // 拒绝/取消时只会向上删除这次新建且仍为空的目录，不触碰既有父目录。
+            newFileCreatedDirectoryRoot = await fs.promises.mkdir(dirPath, { recursive: true });
             // checkpoint 写盘屏障：预写空文件也是落盘，必须在 checkpoint 就绪后执行，
             // 否则批量工具并行写盘可能先于盘点落盘（并发化后 checkpoint 记录会丢失）。
             if (checkpointReady) {
@@ -152,7 +168,9 @@ async function writeSingleFile(
                 prewriteLocked = true;
             }
             try {
-                // 创建空文件以便 DiffManager 可以操作
+                // 创建空文件以便 DiffManager 可以操作。这是确认前的既有预创建行为；
+                // 拒绝/取消后 DiffManager 会删除该文件与本次创建的空父目录，清理失败会
+                // 通过 cleanupError 返回给调用方。未来改用虚拟文档 diff 后可移除此预写。
                 await fs.promises.writeFile(absolutePath, '', 'utf8');
             } catch (error) {
                 // H2：预创建空文件失败时清理可能残留的空文件（仅当确认是本次创建的空文件，
@@ -198,6 +216,7 @@ async function writeSingleFile(
             {
                 confirmedByToolConfirmation: approvedByToolConfirmation === true,
                 newFile: !fileExists,
+                ...(newFileCreatedDirectoryRoot ? { newFileCreatedDirectoryRoot } : {}),
                 conversationId,
                 checkpointReady,
                 // PERF-CP：deferred 模式写盘锁持有者身份（DiffManager 审阅期间持有）
@@ -205,41 +224,20 @@ async function writeSingleFile(
             }
         );
 
-        // 等待 diff 被处理（保存、拒绝、abort 或用户新请求中断）。
-        // 为什么改用 DiffManager 统一等待：write_file 与 apply_diff 都依赖 pending diff 生命周期，不能各自维护略有差异的轮询/监听逻辑。
-        // 怎么改：复用 waitForDiffResolution，让状态监听、轮询兜底和 abort 清理集中在 DiffManager。
-        // 目的：让所有文件写入类 diff-review 工具在自动保存和用户中断场景下表现一致。
-        const interruptReason = await diffManager.waitForDiffResolution(pendingDiff.id, abortSignal);
+        // 等待 diff 被处理并统一解析审阅终态。
+        // 为什么改用统一 helper：write_file 与 apply_diff/insert_code/delete_code/replacePass 都依赖
+        // pending diff 生命周期，终态判定（wasAccepted）、diff 内容保存与取消/拒绝文案必须五处一致，
+        // 不能各自维护略有差异的判定/文案逻辑（发现 04）。
+        const outcome = await resolveDiffOutcome({
+            pendingDiffId: pendingDiff.id,
+            abortSignal,
+            originalContent,
+            newContent: content,
+            filePath,
+            actionLabel: 'Write'
+        });
 
-        // 用户“拒绝”（rejected）与“中断/取消”（abort/user）分开处理：
-        // rejected → status:'rejected' + 可读错误（不标记 cancelled）；abort/user → cancelled: true
-        const wasRejected = interruptReason === 'rejected';
-        const wasInterrupted = interruptReason === 'abort' || interruptReason === 'user';
-        
-        const finalDiff = diffManager.getDiff(pendingDiff.id);
-                // 由 waitForDiffResolution 的终态语义判定：'rejected'（含被 FIFO 淘汰后留痕的拒绝）
-        // 一律不算接受，避免被拒绝的 diff 被淘汰后 !finalDiff 误报"写入成功"。
-        const wasAccepted = interruptReason === 'none';
-        const autoSaveError = finalDiff?.autoSaveError;
-
-        // 尝试将内容保存到 DiffStorageManager，供前端按需加载
-        const diffStorageManager = getDiffStorageManager();
-        let diffContentId: string | undefined;
-        
-        if (diffStorageManager) {
-            try {
-                const diffRef = await diffStorageManager.saveGlobalDiff({
-                    originalContent,
-                    newContent: content,
-                    filePath
-                }, undefined, conversationId);
-                diffContentId = diffRef.diffId;
-            } catch (e) {
-                console.warn('Failed to save diff content to storage:', e);
-            }
-        }
-        
-        if (wasRejected) {
+        if (outcome.wasRejected) {
             // 用户显式拒绝：与取消区分，返回 status:'rejected' + 可读错误
             return {
                 path: filePath,
@@ -247,12 +245,16 @@ async function writeSingleFile(
                 cancelled: false,
                 action: fileExists ? 'modified' : 'created',
                 status: 'rejected',
-                error: 'Diff was rejected by user',
-                diffContentId
+                error: outcome.finalDiff?.cleanupError
+                    ? `${outcome.rejectedMessage}. ${outcome.finalDiff.cleanupError}`
+                    : outcome.rejectedMessage,
+                cleanupError: outcome.finalDiff?.cleanupError,
+                diffContentId: outcome.diffContentId,
+                pendingDiffId: outcome.pendingDiffId
             };
         }
 
-        if (wasInterrupted) {
+        if (outcome.wasInterrupted) {
             // 用户终止/中断，视为取消
             return {
                 path: filePath,
@@ -260,22 +262,32 @@ async function writeSingleFile(
                 cancelled: true,
                 action: fileExists ? 'modified' : 'created',
                 status: 'rejected',
-                error: interruptReason === 'abort'
-                    ? 'Write was cancelled by user'
-                    : 'Write was interrupted by user',
-                diffContentId
+                error: (outcome.interruptKind === 'abort'
+                    ? outcome.abortMessage
+                    : outcome.interruptMessage) + (outcome.finalDiff?.cleanupError
+                    ? `. ${outcome.finalDiff.cleanupError}`
+                    : ''),
+                cleanupError: outcome.finalDiff?.cleanupError,
+                diffContentId: outcome.diffContentId,
+                pendingDiffId: outcome.pendingDiffId
             };
         }
         
         // 简化返回：AI 已经知道写入的内容，不需要重复返回
         return {
             path: filePath,
-            success: wasAccepted,
+            success: outcome.wasAccepted,
             action: fileExists ? 'modified' : 'created',
-            status: wasAccepted ? 'accepted' : 'rejected',
-            error: wasAccepted ? undefined : (autoSaveError || 'Diff was rejected'),
-            autoSaveError,
-            diffContentId
+            status: outcome.wasAccepted ? 'accepted' : 'rejected',
+            error: outcome.wasAccepted
+                ? undefined
+                : `${outcome.autoSaveError || outcome.rejectedMessage}${outcome.finalDiff?.cleanupError
+                    ? `. ${outcome.finalDiff.cleanupError}`
+                    : ''}`,
+            autoSaveError: outcome.autoSaveError,
+            cleanupError: outcome.finalDiff?.cleanupError,
+            diffContentId: outcome.diffContentId,
+            pendingDiffId: outcome.pendingDiffId
         };
     } catch (error) {
         return {
@@ -294,12 +306,17 @@ export function createWriteFileTool(): Tool {
     // 获取工作区信息
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
     
     // 根据工作区数量生成描述
     // 修改原因：write_file 和 apply_diff 一样是单文件 schema，模型容易把它误解为“一轮回复只能调用一次”。
     // 修改方式：在 description 中加入批量写入规则，明确多个独立新文件或重写文件应在同一轮连续输出多个 write_file 调用。
     // 修改目的：让工具声明直接引导模型批量完成已明确的多文件写入计划，避免每写一个文件就停下等待下一轮。
-    let description = `写入内容到一个文件。若文件不存在则创建；若文件已存在则用 content 覆盖其完整内容。执行前会展示 Diff 预览并等待用户确认。
+    let description = isZh
+        ? `写入内容到一个文件。若文件不存在则创建；若文件已存在则用 content 覆盖其完整内容。执行前会展示 Diff 预览并等待用户确认。
+
+注意：目标文件不存在时，为展示 Diff 预览会在确认前预创建空文件。拒绝或取消后会删除该文件，并删除本次新建且仍为空的父目录；若残留清理失败，工具结果会明确报告。
 
 适用场景：
 - 创建新文件
@@ -312,12 +329,34 @@ export function createWriteFileTool(): Tool {
 - 错误示例：写入 A 文件后停止，等下一轮再写入 B 文件。
 - 正确示例：同一轮依次输出 write_file(A)、write_file(B)、write_file(C)。
 
-注意：path 是相对于工作区根目录的路径；content 必须是文件的完整目标内容。修改大文件时，优先考虑 apply_diff，避免整文件重写带来的误删风险。`;
-    let pathDescription = '文件路径，相对于当前工作区根目录。例如：docs/example.md。';
+注意：path 是相对于工作区根目录的路径；content 必须是文件的完整目标内容。修改大文件时，优先考虑 apply_diff，避免整文件重写带来的误删风险。`
+        : `Write content to a file. If the file does not exist, it will be created; if it already exists, its entire content will be overwritten with content. A Diff preview is shown and user confirmation is awaited before applying.
+
+Note: when the target does not exist, an empty file is pre-created before confirmation so the Diff preview can be rendered. Rejecting or cancelling removes that file and any still-empty parent directories created for it; cleanup failures are reported in the tool result.
+
+Use cases:
+- Creating a new file
+- Rewriting the full content of an existing file
+
+Batch write rules:
+- This tool still writes only one file per call; if you plan to create or rewrite multiple independent files, output multiple write_file calls in a row in the same reply.
+- Do not stop and wait for results after the first write_file unless a later write depends on its result or you need to confirm whether the previous write succeeded.
+- For clearly specified, independent multi-file writes, emit all write_file calls at once to reduce pointless tool iterations.
+- Wrong example: writing file A then stopping and waiting for the next round to write file B.
+- Correct example: output write_file(A), write_file(B), write_file(C) in sequence in the same round.
+
+Note: path is relative to the workspace root; content must be the complete target content of the file. When modifying large files, prefer apply_diff to avoid the risk of accidental deletion from full-file rewrites.`;
+    let pathDescription = isZh
+        ? '文件路径，相对于当前工作区根目录。例如：docs/example.md。'
+        : 'File path, relative to the current workspace root. For example: docs/example.md.';
     
     if (isMultiRoot) {
-        description += `\n\n多根工作区：path 必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`;
-        pathDescription = `文件路径。当前是多根工作区，必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`;
+        description += isZh
+            ? `\n\n多根工作区：path 必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`
+            : `\n\nMulti-root workspace: path must use the "workspace_name/path" format. Available workspaces: ${workspaces.map(w => w.name).join(', ')}.`;
+        pathDescription = isZh
+            ? `文件路径。当前是多根工作区，必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}。`
+            : `File path. This is a multi-root workspace, so it must use the "workspace_name/path" format. Available workspaces: ${workspaces.map(w => w.name).join(', ')}.`;
     }
     
     return {
@@ -335,17 +374,16 @@ export function createWriteFileTool(): Tool {
                     },
                     content: {
                         type: 'string',
-                        description: '要写入文件的完整内容。已有文件会被该内容整体覆盖。'
+                        description: isZh
+                            ? '要写入文件的完整内容。已有文件会被该内容整体覆盖。'
+                            : 'The complete content to write to the file. An existing file is entirely overwritten by this content.'
                     }
                 },
                 required: ['path', 'content']
             }
         },
         handler: async (args, context?: ToolContext): Promise<ToolResult> => {
-            const entry: WriteFileEntry = {
-                path: args.path as string,
-                content: args.content as string
-            };
+            const entry: WriteFileEntry = parseArgs<WriteFileArgs>(args);
 
             const accessError = ensureOutsideWorkspaceAccessApproved('write_file', args, context);
             if (accessError) {

@@ -54,10 +54,11 @@ import { getDiffManager } from '../backend/core/services/diffManager';
 import { warmUpShellAvailabilityCache } from '../backend/tools/terminal/execute_command';
 import { resolveMainChatDiffViewColumn } from '../backend/tools/file/diffViewColumn';
 import { addChatFocusRestoreNotifier } from '../backend/core/chatFocusGuard';
-import { MessageRouter } from './MessageRouter';
-import { MESSAGE_NAMES, PUSH_MESSAGE_NAMES } from '../shared/protocol';
+import { MessageRouter, STREAM_MESSAGE_TYPES } from './MessageRouter';
+import { MESSAGE_NAMES, PUSH_MESSAGE_NAMES, NON_BLOCKING_MESSAGE_TYPES } from '../shared/protocol';
 import { scheduleWebviewMessage } from './messageHandlingQueue';
 import { WEBVIEW_CLIENT_IDS, WebviewClientRegistry } from './runtime/WebviewClientRegistry';
+import type { WebviewClientId } from './runtime/WebviewClientRegistry';
 import type { RunScope } from '../backend/core/RunController';
 import { initializeSubAgentsFromSettings } from './handlers/SubAgentsHandlers';
 import type { HandlerContext, DiffPreviewContentProvider as IDiffPreviewContentProvider } from './types';
@@ -70,6 +71,8 @@ import { disposeFileHandlerResources } from './handlers/FileHandlers';
 import { clearExecCmdAvailabilityCache } from './handlers/ToolHandlers';
 import { getExtensionVersion } from './utils/extensionInfo';
 import { WorkspaceManager, setWorkspaceManager, type WorkspaceFolderInfo } from './utils/WorkspaceManager';
+import { createSettingsExporter } from './utils/settingsTransfer';
+import type { SettingsTransferSource } from './utils/settingsTransfer';
 import {
     buildDeferredFrontendLoader,
     buildStartupBootstrapMarkup,
@@ -123,6 +126,56 @@ class DiffPreviewContentProvider implements vscode.TextDocumentContentProvider, 
     public dispose(): void {
         this.contents.clear();
         this.onDidChangeEmitter.dispose();
+    }
+}
+
+/**
+ * 会话代际感知的 WebviewClientRegistry 包装（发现 12）。
+ *
+ * 主聊天响应经 MessageRouter 走 registry 优先投递（registry 命中则不再回退到
+ * ctx.sendResponse），因此仅给 ctx.sendResponse 加代际守卫不够——旧代际慢请求完成时
+ * registry 会把旧 requestId 的响应投到重建后的新视图。此包装在 registry 的
+ * sendResponse/sendError 前拦截，非当前代际的响应直接丢弃（返回 true 阻止回退重投）。
+ */
+class GenerationAwareWebviewClientRegistry extends WebviewClientRegistry {
+    constructor(
+        private readonly delegate: WebviewClientRegistry,
+        private readonly shouldDrop: (requestId: string) => boolean,
+        private readonly finish: (requestId: string) => void
+    ) {
+        super();
+    }
+
+    resolveClientId(requestedClientId?: unknown, fallbackClientId?: unknown): WebviewClientId | undefined {
+        return this.delegate.resolveClientId(requestedClientId, fallbackClientId);
+    }
+
+    isClientReachable(clientId: unknown): boolean {
+        return this.delegate.isClientReachable(clientId);
+    }
+
+    postMessage(clientId: unknown, message: Record<string, unknown>, onDeliveryFailed?: () => void): boolean {
+        return this.delegate.postMessage(clientId, message, onDeliveryFailed);
+    }
+
+    sendResponse(clientId: unknown, requestId: string, data: unknown): boolean {
+        if (this.shouldDrop(requestId)) {
+            this.finish(requestId);
+            return true;
+        }
+        const delivered = this.delegate.sendResponse(clientId, requestId, data);
+        this.finish(requestId);
+        return delivered;
+    }
+
+    sendError(clientId: unknown, requestId: string, code: string, message: string): boolean {
+        if (this.shouldDrop(requestId)) {
+            this.finish(requestId);
+            return true;
+        }
+        const delivered = this.delegate.sendError(clientId, requestId, code, message);
+        this.finish(requestId);
+        return delivered;
     }
 }
 
@@ -194,6 +247,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 消息处理队列，用于确保消息按顺序处理（解决技能切换与对话请求的竞态问题）
     private messageHandlingQueue: Promise<void> = Promise.resolve();
+
+    /** 会话代际号：视图每次重建/关闭时递增，用于丢弃旧会话在途任务的投递（发现 12） */
+    private generation = 0;
+
+    /** requestGeneration 兜底上限：超出按插入顺序淘汰最旧条目（防止极端无响应 fire-and-forget 泄漏，发现 12） */
+    private static readonly MAX_REQUEST_GENERATION_ENTRIES = 10_000;
+
+    /** requestId → 发起时的会话代际：仅主聊天消息登记，用于投递前比对代际（发现 12） */
+    private readonly requestGeneration = new Map<string, number>();
 
     /**
      * 当前 webview view 实例的事件订阅。
@@ -277,7 +339,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
      * 初始化后端模块
      */
     private async initializeBackend() {
-        // 1. 初始化设置管理器（需要最先初始化以获取存储路径配置）
         const legacySettingsDir = path.join(this.context.globalStorageUri.fsPath, 'settings');
         const settingsStorage = new VSCodeSettingsStorage({
             legacySettingsDir
@@ -893,6 +954,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             d.dispose();
         }
 
+        // 会话代际递增（发现 12）：视图重建后，旧代际在途任务的投递应被丢弃
+        this.generation++;
+
         // M-web：视图重建时重置消息处理队列——上一轮视图残留的排队任务（如等待后端
         // 初始化的挂起请求）可能仍在链上，若不清零会让新视图的首条消息被旧任务延迟
         this.messageHandlingQueue = Promise.resolve();
@@ -919,13 +983,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // 监听来自 webview 的消息
         webviewView.webview.onDidReceiveMessage(
             (message) => {
+                // 捕获消息到达时的会话代际（发现 12）：视图重建后，旧队列上仍待执行的消息
+                // 属于旧会话，其响应必须丢弃而不是投递到新视图。
+                const messageGeneration = this.generation;
                 // 普通消息保持串行；webviewReady 必须真正绕过队列。
                 // 若先到的 config/list 请求正在等待 BackendHost，握手排队会让 pendingCommands
                 //（尤其 newChat）无法 flush，前端表现为点击/首条发送后无反应。
                 this.messageHandlingQueue = scheduleWebviewMessage(
                     this.messageHandlingQueue,
                     message,
-                    currentMessage => this.handleMessage(currentMessage),
+                    currentMessage => this.handleMessage(currentMessage, messageGeneration),
                     err => console.error('[ChatViewProvider] Error in message handling queue:', err)
                 );
             },
@@ -994,6 +1061,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // webview 面板关闭/销毁时清理视图级订阅
         this.viewDisposables.push(
             webviewView.onDidDispose(() => {
+                // 会话代际递增（发现 12）：关闭/销毁视图后，旧代际在途任务的投递应被丢弃
+                this.generation++;
                 for (const d of this.viewDisposables.splice(0)) {
                     d.dispose();
                 }
@@ -1060,12 +1129,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     /**
      * 处理来自前端的消息
      */
-    private async handleMessage(message: any) {
+    private async handleMessage(message: any, generation: number = this.generation) {
+        // dispose() 后旧消息不再执行：扩展已停用，继续路由会访问已释放的模块（F2）
+        if (this.disposed) {
+            return;
+        }
         if (!message || typeof message !== 'object' || Array.isArray(message)) {
             this.sendError('', 'INVALID_MESSAGE', 'Invalid webview message');
             return;
         }
-        const { type, data, requestId } = message;
+        const { type, data } = message;
+        // 入口归一化：requestId 非字符串时归一为 ''——JSON 序列化会丢弃值为 undefined 的键，
+        // 前端按 requestId 匹配响应，undefined 会让错误响应无法匹配（前端只能走自身超时）
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
         // 安全：不信任消息体中的 clientId。来源 webview 是主聊天视图
         // （注册身份固定为 mainChat），路由身份按来源 webview 的注册身份决定，
         // 防止主聊天伪造 clientId='subagent-monitor' 触发 monitor 专属操作
@@ -1097,6 +1173,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        // 登记请求代际（发现 12）：webviewReady 是当前视图握手，直接投递，无需登记
+        this.trackRequestGeneration(requestId, generation);
+
+        // fire-and-forget（流式 + 非阻塞）消息的 handler 在 handleMessage 返回后才异步完成，
+        // 代际登记需保留到 handler 实际投递时由 sendResponse/sendError 清理，不能在 finally 里提前删。
+        const isFireAndForget = STREAM_MESSAGE_TYPES.includes(type) || NON_BLOCKING_MESSAGE_TYPES.has(type);
+
         try {
             // 等待初始化完成
             await this.initPromise;
@@ -1121,11 +1204,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             
             if (!handled) {
                 console.warn('Unknown message type:', type);
-                this.sendError(requestId, 'UNKNOWN_TYPE', `Unknown message type: ${type}`);
+                // 无 requestId 的错误响应附带 messageType，便于前端按消息类型兜底处理（发现 11）
+                this.sendError(requestId, 'UNKNOWN_TYPE', `Unknown message type: ${type}`,
+                    requestId ? undefined : { messageType: typeof type === 'string' ? type : String(type) });
             }
         } catch (error: any) {
             console.error('Error handling message:', error);
             this.sendError(requestId, error.code || 'HANDLER_ERROR', error instanceof Error ? error.message : String(error));
+        } finally {
+            // 阻塞消息：正常响应/错误已在投递时清理，此处兜底清理未回响应的请求（如无响应 handler），
+            // 避免 requestGeneration 无界增长。fire-and-forget 消息由投递点负责清理（发现 12）。
+            if (!isFireAndForget) {
+                this.finishRequestGeneration(requestId);
+            }
         }
     }
 
@@ -1263,31 +1354,87 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log.info('disposed');
     }
     
+    /** 登记请求代际（发现 12）：仅主聊天 handleMessage 调用 */
+    private trackRequestGeneration(requestId: string, generation: number): void {
+        if (!requestId) {
+            return;
+        }
+        // 兜底上限：fire-and-forget 且从不回响应的请求不会走到投递点清理，
+        // 极端情况下按插入顺序淘汰最旧条目，防止 requestGeneration 无界增长（发现 12）
+        if (this.requestGeneration.size >= ChatViewProvider.MAX_REQUEST_GENERATION_ENTRIES) {
+            const oldest = this.requestGeneration.keys().next().value;
+            if (oldest !== undefined) {
+                this.requestGeneration.delete(oldest);
+            }
+        }
+        this.requestGeneration.set(requestId, generation);
+    }
+
+    /** 判断请求是否属于旧会话代际（发现 12）：投递前比对，旧代际丢弃 */
+    private isStaleRequest(requestId: string): boolean {
+        if (!requestId) {
+            return false;
+        }
+        const generation = this.requestGeneration.get(requestId);
+        return generation !== undefined && generation !== this.generation;
+    }
+
+    /** 清理请求代际登记（投递完成或兜底，防止无界增长） */
+    private finishRequestGeneration(requestId: string): void {
+        if (requestId) {
+            this.requestGeneration.delete(requestId);
+        }
+    }
+
+    /** 会话代际感知的 registry 包装：拦截 MessageRouter 的 registry 优先投递路径（发现 12） */
+    private createGenerationAwareRegistry(): WebviewClientRegistry {
+        return new GenerationAwareWebviewClientRegistry(
+            this.webviewClientRegistry,
+            (requestId) => this.isStaleRequest(requestId),
+            (requestId) => this.finishRequestGeneration(requestId)
+        );
+    }
+
     /**
      * 发送响应到前端
      */
     private sendResponse(requestId: string, data: any) {
+        // 旧代际任务的响应丢弃：视图已重建，投递会串到新视图（带旧 requestId，前端忽略）（发现 12）
+        if (this.isStaleRequest(requestId)) {
+            this.finishRequestGeneration(requestId);
+            return;
+        }
         this.postRoutedWebviewMessage(WEBVIEW_CLIENT_IDS.mainChat, {
             type: PUSH_MESSAGE_NAMES.response,
             requestId,
             success: true,
             data
         }, this._view?.webview);
+        this.finishRequestGeneration(requestId);
     }
 
     /**
      * 发送错误到前端
      */
-    private sendError(requestId: string, code: string, message: string) {
+    private sendError(requestId: string, code: string, message: string, extra?: Record<string, unknown>) {
+        // 旧代际任务的错误响应同样丢弃（发现 12）
+        if (this.isStaleRequest(requestId)) {
+            this.finishRequestGeneration(requestId);
+            return;
+        }
+        // extra：可选附加字段（如无 requestId 时的 messageType），JSON 序列化会丢弃 undefined，
+        // 无额外字段时输出结构与既有协议完全一致
+        const error: Record<string, unknown> = { code, message };
+        if (extra) {
+            Object.assign(error, extra);
+        }
         this.postRoutedWebviewMessage(WEBVIEW_CLIENT_IDS.mainChat, {
             type: PUSH_MESSAGE_NAMES.error,
             requestId,
             success: false,
-            error: {
-                code,
-                message
-            }
+            error
         }, this._view?.webview);
+        this.finishRequestGeneration(requestId);
     }
 
     /**
@@ -1342,6 +1489,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return this.storagePathManager.getEffectiveDataPath();
     }
 
+    /** 汇集 SettingsExporter 依赖来源（设置导出/导入共享，发现 7） */
+    private settingsTransferSource(): SettingsTransferSource {
+        return {
+            settingsManager: this.settingsManager,
+            configManager: this.configManager,
+            mcpManager: this.mcpManager,
+            storagePathManager: this.storagePathManager,
+            extensionPath: this.context.extensionPath
+        };
+    }
+
+    /**
+     * 供命令入口（settingsCommands）构造共享导出/导入所需的依赖来源。
+     * 等待后端初始化完成后再返回，保证 manager 引用已同步（发现 7）。
+     */
+    public async createSettingsTransferSource(): Promise<SettingsTransferSource> {
+        await this.initPromise;
+        return this.settingsTransferSource();
+    }
+
     /**
      * 导出插件设置（排除对话历史和检查点）
      *
@@ -1350,19 +1517,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     public async exportSettings(): Promise<string> {
         await this.initPromise;
 
-        const skillsManager = getSkillsManager();
-        if (!skillsManager) {
+        const exporter = createSettingsExporter(this.settingsTransferSource());
+        if (!exporter) {
             throw new Error('SkillsManager is not initialized.');
         }
-
-        const exporter = new SettingsExporter(
-            this.settingsManager,
-            this.configManager,
-            this.mcpManager,
-            skillsManager,
-            getExtensionVersion(this.context.extensionPath),
-            this.storagePathManager.getEffectiveDataPath() + '/skills'
-        );
 
         return await exporter.exportToJson(true);
     }
@@ -1379,19 +1537,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ): Promise<{ success: boolean; imported: { vscodeSettings: boolean; channelConfigs: number; mcpServers: number; skills: number }; errors: string[] }> {
         await this.initPromise;
 
-        const skillsManager = getSkillsManager();
-        if (!skillsManager) {
+        const exporter = createSettingsExporter(this.settingsTransferSource());
+        if (!exporter) {
             throw new Error('SkillsManager is not initialized.');
         }
-
-        const exporter = new SettingsExporter(
-            this.settingsManager,
-            this.configManager,
-            this.mcpManager,
-            skillsManager,
-            getExtensionVersion(this.context.extensionPath),
-            this.storagePathManager.getEffectiveDataPath() + '/skills'
-        );
 
         const data = exporter.parseExportData(json);
         return await exporter.importFromData(data, options);

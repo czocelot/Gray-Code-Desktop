@@ -93,7 +93,9 @@ export function createMessageRouterHarness() {
         chatHandler as any,
         conversationManager as any,
         {} as any,
-        () => undefined,
+        // 模拟 Monitor 已注册且视图可达：StreamChunkProcessor.getView 依赖它判断视图可达性
+        // （04#3 后默认「无 view 即 abort」，测试需显式提供可达 view 模拟真实用户路径）
+        () => ({ webview: { postMessage: () => true } as any }),
         rawSendResponse,
         rawSendError,
         clientRegistry
@@ -122,6 +124,9 @@ export function createToolLoopHarness(channelManager: unknown, toolRegistry: unk
         getHistoryRef: jest.fn().mockResolvedValue([]),
         getCustomMetadata: jest.fn().mockResolvedValue(undefined),
         setCustomMetadata: jest.fn().mockResolvedValue(undefined),
+        // CP-PARTIAL-1：会话元数据（工作区 URI 来源）；默认 null = 未绑定工作区，
+        // 链路测试可覆盖 mockResolvedValue({ workspaceUri: 'file:///...' }) 注入工作区
+        getMetadata: jest.fn().mockResolvedValue(null),
         addContent: jest.fn().mockResolvedValue(undefined),
         settleFunctionResponses: jest.fn().mockResolvedValue(undefined),
         updateMessage: jest.fn().mockResolvedValue(undefined),
@@ -131,7 +136,9 @@ export function createToolLoopHarness(channelManager: unknown, toolRegistry: unk
     const toolExecutionService = new ToolExecutionService(toolRegistry as never);
     const checkpointService = {
         createModelMessageCheckpoint: jest.fn().mockResolvedValue(null),
-        createToolExecutionCheckpoint: jest.fn().mockResolvedValue(null)
+        createToolExecutionCheckpoint: jest.fn().mockResolvedValue(null),
+        // CPF-07：默认所有工具均视为已配置存档工具；需要模拟「纯只读/未配置」语义的测试可覆盖
+        isToolConfiguredForCheckpoint: jest.fn().mockReturnValue(true)
     };
     const messageBuilderService = { buildHistoryOptions: jest.fn().mockReturnValue({}) };
     const contextTrimService = {
@@ -327,6 +334,7 @@ export function createChatFlowHarness(options: {
         getCustomMetadata: jest.fn().mockResolvedValue(undefined),
         setCustomMetadata: jest.fn().mockResolvedValue(undefined),
         rejectAllPendingToolCalls: jest.fn().mockResolvedValue(undefined),
+        addMessage: jest.fn().mockResolvedValue(undefined),
         addContent: jest.fn().mockResolvedValue(undefined),
         settleFunctionResponses: jest.fn().mockResolvedValue(undefined),
         getMessageNodeIdAt: jest.fn().mockResolvedValue(undefined),
@@ -345,8 +353,27 @@ export function createChatFlowHarness(options: {
         cancelAllPending: jest.fn().mockResolvedValue(undefined),
         resetUserInterrupt: jest.fn(),
     };
+    const deleteCheckpointsFromIndex = jest.fn().mockResolvedValue(undefined);
     const checkpointService = {
-        deleteCheckpointsFromIndex: jest.fn().mockResolvedValue(undefined),
+        deleteCheckpointsFromIndex,
+        runWithCheckpointDeletionLock: jest.fn(async (_conversationId: string, task: (
+            deleteFromIndex: (
+                startIndex: number,
+                excludeCheckpointId?: string,
+                lineageNodeIdsOverride?: ReadonlySet<string>
+            ) => Promise<void>
+        ) => Promise<unknown>) => await task(async (
+            startIndex: number,
+            excludeCheckpointId?: string,
+            lineageNodeIdsOverride?: ReadonlySet<string>
+        ) => {
+            await deleteCheckpointsFromIndex(
+                _conversationId,
+                startIndex,
+                excludeCheckpointId,
+                lineageNodeIdsOverride
+            );
+        })),
         createUserMessageCheckpoint: jest.fn().mockResolvedValue(null),
     };
     const toolIterationLoopService = {
@@ -380,6 +407,8 @@ export function createChatFlowHarness(options: {
     return {
         flowService,
         conversationManager,
+        checkpointService,
+        diffInterruptService,
         toolIterationLoopService,
         branchService: options.branchService as { syncGraphAfterHistoryDelete: jest.Mock }
     };

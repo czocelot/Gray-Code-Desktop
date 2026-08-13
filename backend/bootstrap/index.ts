@@ -60,7 +60,7 @@ import {
     hasAvailableSubAgent
 } from '../tools';
 import type { TerminalOutputEvent, ImageGenOutputEvent, TaskEvent } from '../tools';
-import { registerToolDeclarationFactory } from '../tools/toolDeclarationRegistry';
+import { registerToolDeclarationFactory, assertToolDeclarationFactories } from '../tools/toolDeclarationRegistry';
 import { createReadFileTool } from '../tools/file/read_file';
 import {
     createGenerateImageTool,
@@ -69,6 +69,23 @@ import {
     createResizeImageTool,
     createRotateImageTool
 } from '../tools/media';
+import { createWriteFileTool } from '../tools/file/write_file';
+import { createListFilesTool } from '../tools/file/list_files';
+import { createDeleteFileTool } from '../tools/file/delete_file';
+import { createCreateDirectoryTool } from '../tools/file/create_directory';
+import { createInsertCodeTool } from '../tools/file/insert_code';
+import { createDeleteCodeTool } from '../tools/file/delete_code';
+import { createApplyDiffTool } from '../tools/file/diff/declaration';
+import { createSearchInFilesTool } from '../tools/search/declaration';
+import { createFindFilesTool } from '../tools/search/find_files';
+import { createGetSymbolsTool } from '../tools/lsp/get_symbols';
+import { createGotoDefinitionTool } from '../tools/lsp/goto_definition';
+import { createFindReferencesTool } from '../tools/lsp/find_references';
+import { createExecuteCommandTool } from '../tools/terminal/processRunner';
+import { createHistorySearchTool } from '../tools/history/history_search';
+import { getReadSkillTool } from '../tools/skills/readSkill';
+import { createSubAgentsTool } from '../tools/subagents/subagents';
+import { createAgentSendMessageTool } from '../tools/subagents/agentSendMessage';
 import { createSkillsManager, getSkillsManager } from '../modules/skills';
 import { initMemoryManager } from '../modules/memory';
 import { registerMaintenanceCommands } from '../tools/maintenance/commands';
@@ -94,6 +111,11 @@ import { setSubAgentAvailabilityQuery } from '../core/subAgentAvailabilityBridge
 
 const log = Logger.get('backend/bootstrap');
 const UPDATE_CHECK_DELAY_MS = 10_000;
+/**
+ * TaskManager 泄漏任务周期清扫间隔（发现 01）：abort 后未注销 / 驻留超 30 分钟的任务，
+ * 正常运行期间兜底补发 cancelled 终态并移除（dispose 时同步 clearInterval）。
+ */
+const TASK_CLEANUP_INTERVAL_MS = 60_000;
 
 /** ChannelManager 重试状态（与 modules/channel RetryStatusCallback 结构一致，避免穿透导入） */
 export interface BackendRetryStatus {
@@ -157,6 +179,8 @@ export class BackendRuntime {
     private readonly cleanupFns: Array<() => void> = [];
     /** 延迟更新检查定时器（重试/回滚/dispose 时清理） */
     private updateCheckTimer?: NodeJS.Timeout;
+    /** TaskManager 泄漏任务周期清扫定时器（dispose/回滚时清理；初始化成功后重建，重试幂等） */
+    private taskCleanupTimer?: NodeJS.Timeout;
     /** graycode.runIntegrityCheck 命令注册 disposable（重试初始化前先注销旧注册） */
     private maintenanceCommandDisposable?: vscode.Disposable;
     /** 完整性检查输出通道（VSCode createOutputChannel 同名复用，重试不重建） */
@@ -176,6 +200,13 @@ export class BackendRuntime {
         if (this.updateCheckTimer !== undefined) {
             clearTimeout(this.updateCheckTimer);
             this.updateCheckTimer = undefined;
+        }
+    }
+
+    private clearTaskCleanupTimer(): void {
+        if (this.taskCleanupTimer !== undefined) {
+            clearInterval(this.taskCleanupTimer);
+            this.taskCleanupTimer = undefined;
         }
     }
 
@@ -377,14 +408,41 @@ export class BackendRuntime {
         registerToolDeclarationFactory('read_file', (args) => createReadFileTool(args.multimodalEnabled, args.channelType, args.toolMode));
         registerToolDeclarationFactory('generate_image', (args) => createGenerateImageTool(args.maxBatchTasks, args.maxImagesPerTask, args.paramsConfig));
         registerToolDeclarationFactory('remove_background', (args) => createRemoveBackgroundTool(args.maxBatchTasks));
-        registerToolDeclarationFactory('crop_image', (args) => createCropImageTool(args.maxBatchTasks));
+        registerToolDeclarationFactory('crop_image', (args) => createCropImageTool(args.maxBatchTasks, { useNormalizedCoordinates: args.useNormalizedCoordinates }));
         registerToolDeclarationFactory('resize_image', (args) => createResizeImageTool(args.maxBatchTasks));
         registerToolDeclarationFactory('rotate_image', (args) => createRotateImageTool(args.maxBatchTasks));
+
+        // 模型工具声明国际化：为 17 个半动态工具注册声明工厂（M-i18n）。
+        // 描述语言（zh-CN → 中文，en/ja → 英文）与动态信息（工作区列表、shell 列表、
+        // 技能列表、代理列表、MAX_HOP_DEPTH、截断行数等）由工厂每次调用时重新构建，
+        // 语言切换后 resolver 按需重建声明；这些工具不依赖解析选项，factory 忽略 args。
+        // 懒创建：每次调用重建，不要缓存（语义与 read_file/图片工具注册一致）。
+        registerToolDeclarationFactory('write_file', () => createWriteFileTool());
+        registerToolDeclarationFactory('list_files', () => createListFilesTool());
+        registerToolDeclarationFactory('delete_file', () => createDeleteFileTool());
+        registerToolDeclarationFactory('create_directory', () => createCreateDirectoryTool());
+        registerToolDeclarationFactory('insert_code', () => createInsertCodeTool());
+        registerToolDeclarationFactory('delete_code', () => createDeleteCodeTool());
+        registerToolDeclarationFactory('apply_diff', () => createApplyDiffTool());
+        registerToolDeclarationFactory('search_in_files', () => createSearchInFilesTool());
+        registerToolDeclarationFactory('find_files', () => createFindFilesTool());
+        registerToolDeclarationFactory('get_symbols', () => createGetSymbolsTool());
+        registerToolDeclarationFactory('goto_definition', () => createGotoDefinitionTool());
+        registerToolDeclarationFactory('find_references', () => createFindReferencesTool());
+        registerToolDeclarationFactory('execute_command', () => createExecuteCommandTool());
+        registerToolDeclarationFactory('history_search', () => createHistorySearchTool());
+        registerToolDeclarationFactory('read_skill', () => getReadSkillTool());
+        registerToolDeclarationFactory('subagents', () => createSubAgentsTool());
+        registerToolDeclarationFactory('agent_send_message', () => createAgentSendMessageTool());
 
         // 注册 SubAgent 可用性查询（A1：modules 层经 core 桥读取，tools 层实现在组合根注入）。
         // 幂等：覆盖式注册，重试初始化重复调用安全；查询函数在工具声明解析时才执行，
         // 语义与改造前 ToolDeclarationResolver 直连 hasAvailableSubAgent 一致。
         setSubAgentAvailabilityQuery(hasAvailableSubAgent);
+
+        // 动态声明自检（发现 15）：工厂注册完成后断言「声明含 getter 的工具」都有工厂，
+        // 防止注释清单与注册漂移导致 resolver 静默回退静态声明（描述不更新而非报错）。
+        assertToolDeclarationFactories(toolRegistry.getAllTools());
     }
 
     /** 11.1. 同步 skills 启用状态（settings 无记录的新 Skill 默认启用） */
@@ -510,6 +568,20 @@ export class BackendRuntime {
         this.trackCleanup(TaskManager.onTaskEvent((event) => {
             this.hooks.handleTaskEvent(event);
         }));
+
+        // TaskManager 泄漏兜底周期清扫（发现 01）：cleanup() 此前只在 dispose 执行一次，
+        // 「已取消未注销」与「驻留超 30 分钟」的任务在正常运行期间永远残留。
+        // 挂在正常运行期的心跳上，每分钟清扫一次；dispose/失败回滚时由 clearTaskCleanupTimer 清理。
+        // 重试幂等：仅当不存在时创建（回滚已清理，重试再建）。
+        if (this.taskCleanupTimer === undefined) {
+            this.taskCleanupTimer = setInterval(() => {
+                try {
+                    TaskManager.cleanup();
+                } catch (error) {
+                    log.warn('task_cleanup_sweep_failed', { error: error?.message || String(error) });
+                }
+            }, TASK_CLEANUP_INTERVAL_MS);
+        }
     }
 
     /** 23-25.5. MCP 管理器 + 接线 Channel/Chat + 全局引用（前置：storagePathManager/channelManager/chatHandler） */
@@ -605,7 +677,7 @@ export class BackendRuntime {
             isCheckEnabled: () => settingsManager.getSettings().checkForUpdates !== false,
             // 复用渠道代理配置：GitHub API/下载在代理环境下同样走代理
             getProxyUrl: () => {
-                const proxy = settingsManager.getSettings().proxy;
+                const proxy = settingsManager.getUpdateSettings().proxy;
                 return proxy?.enabled && proxy?.url ? proxy.url : undefined;
             },
             // 上次检查时间戳存扩展 globalState（内部状态，不参与 Settings Sync）
@@ -691,6 +763,9 @@ export class BackendRuntime {
 
         // 取消所有活跃任务
         TaskManager.cancelAllTasks();
+
+        // 停掉周期清扫定时器：dispose 末尾有同步 cleanup() 兜底，先清定时器避免竞态
+        this.clearTaskCleanupTimer();
 
         // 清扫泄漏任务：cancelAllTasks 仅触发 abort 不删除条目，这里把已 abort 却未走
         // unregisterTask 注销（泄漏）的任务补发 cancelled 终态事件后移除，activeTasks 不留残项。

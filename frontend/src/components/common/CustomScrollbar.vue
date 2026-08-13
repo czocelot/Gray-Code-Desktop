@@ -1025,7 +1025,7 @@ defineExpose({
       <button 
         v-if="showJumpButtons" 
         class="jump-btn jump-btn-top" 
-        :title="t ? t('components.common.scrollToTop') : 'Scroll to top'"
+        :title="t('components.common.scrollToTop')"
         @click.stop="scrollToTop"
       >
         <i class="codicon codicon-chevron-up"></i>
@@ -1060,7 +1060,7 @@ defineExpose({
           role="slider"
           tabindex="0"
           aria-orientation="vertical"
-          :aria-label="t ? t('components.common.scrollbar') : 'Scrollbar'"
+          :aria-label="t('components.common.scrollbar')"
           :aria-valuemin="0"
           :aria-valuemax="100"
           :aria-valuenow="Math.round(vScrollRatio)"
@@ -1092,7 +1092,7 @@ defineExpose({
       <button 
         v-if="showJumpButtons" 
         class="jump-btn jump-btn-bottom" 
-        :title="t ? t('components.common.scrollToBottom') : 'Scroll to bottom'"
+        :title="t('components.common.scrollToBottom')"
         @click.stop="() => scrollToBottom()"
       >
         <i class="codicon codicon-chevron-down"></i>
@@ -1114,7 +1114,7 @@ defineExpose({
         role="slider"
         tabindex="0"
         aria-orientation="horizontal"
-        :aria-label="t ? t('components.common.horizontalScrollbar') : 'Horizontal scrollbar'"
+        :aria-label="t('components.common.horizontalScrollbar')"
         :aria-valuemin="0"
         :aria-valuemax="100"
         :aria-valuenow="Math.round(hScrollRatio)"

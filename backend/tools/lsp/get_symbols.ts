@@ -7,6 +7,7 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolResult } from '../types';
+import { parseArgs } from '../types';
 import { resolveUri, getAllWorkspaces, mapWithConcurrency } from '../utils';
 import {
     LSP_TIMEOUT_MS,
@@ -15,6 +16,8 @@ import {
     executeLspCommandWithRetry
 } from './lspLifecycle';
 import { ensureOutsideWorkspaceAccessApproved } from '../file/outsideWorkspaceAccess';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
 
 // 兼容别名：既有调用方与测试从 get_symbols 导入这两个常量
 // （超时/中止/瞬时重试的具体实现已上移到共享模块 lspLifecycle）
@@ -90,6 +93,13 @@ interface FileSymbolResult {
     error?: string;
     /** 符号数量超过上限被截断（调用方聚合到总结果中） */
     truncated?: boolean;
+}
+
+/**
+ * get_symbols 的规范化参数形状。
+ */
+interface GetSymbolsArgs {
+    paths: string[];
 }
 
 /**
@@ -229,8 +239,17 @@ async function getSymbolsForFile(filePath: string, abortSignal?: AbortSignal, ac
 export function createGetSymbolsTool(): Tool {
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
     
-    let description = `Get all symbols (classes, functions, variables, etc.) in one or more files. This is useful for:
+    let description = isZh
+        ? `获取一个或多个文件中的全部符号（类、函数、变量等）。适用于：
+- 在读取特定代码段之前先了解文件结构
+- 查找你想查看的函数/类的行号
+- 在不读取全部内容的情况下概览多个文件
+
+返回带名称、类型和行号的分层符号列表。`
+        : `Get all symbols (classes, functions, variables, etc.) in one or more files. This is useful for:
 - Understanding file structure before reading specific sections
 - Finding the line numbers of functions/classes you want to examine
 - Getting an overview of multiple files without reading all content
@@ -238,16 +257,24 @@ export function createGetSymbolsTool(): Tool {
 Returns hierarchical symbol list with name, kind, and line numbers.`;
     
     // 数组格式强调说明
-    const arrayFormatNote = '\n\n**IMPORTANT**: The `paths` parameter MUST be an array, even for a single file. Example: `{"paths": ["file.ts"]}`, NOT `{"path": "file.ts"}`.';
+    const arrayFormatNote = isZh
+        ? '\n\n**重要**：`paths` 参数必须是数组，即使只传一个文件。示例：`{"paths": ["file.ts"]}`，不要写成 `{"path": "file.ts"}`。'
+        : '\n\n**IMPORTANT**: The `paths` parameter MUST be an array, even for a single file. Example: `{"paths": ["file.ts"]}`, NOT `{"path": "file.ts"}`.';
     description += arrayFormatNote;
     
     if (isMultiRoot) {
-        description += '\n\nMulti-root workspace: Use "workspace_name/path" format to specify the workspace.';
+        description += isZh
+            ? '\n\n多根工作区：使用 "workspace_name/path" 格式指定工作区。'
+            : '\n\nMulti-root workspace: Use "workspace_name/path" format to specify the workspace.';
     }
     
-    let pathsDescription = 'Array of file paths (relative to workspace root). MUST be an array even for single file, e.g., ["file.ts"]';
+    let pathsDescription = isZh
+        ? '文件路径数组（相对于工作区根目录）。即使只传一个文件也必须传数组，例如：["file.ts"]'
+        : 'Array of file paths (relative to workspace root). MUST be an array even for single file, e.g., ["file.ts"]';
     if (isMultiRoot) {
-        pathsDescription = `Array of file paths, use "workspace_name/path" format. MUST be an array even for single file. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
+        pathsDescription = isZh
+            ? `文件路径数组，使用 "workspace_name/path" 格式。即使只传一个文件也必须传数组。可用工作区：${workspaces.map(w => w.name).join(', ')}`
+            : `Array of file paths, use "workspace_name/path" format. MUST be an array even for single file. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
     }
     
     return {
@@ -271,7 +298,7 @@ Returns hierarchical symbol list with name, kind, and line numbers.`;
             }
         },
         handler: async (args, context): Promise<ToolResult> => {
-            const pathList = args.paths as string[];
+            const pathList = parseArgs<GetSymbolsArgs>(args).paths;
             
             if (!pathList || !Array.isArray(pathList) || pathList.length === 0) {
                 return { success: false, error: 'paths is required and must be a non-empty array' };
@@ -279,7 +306,9 @@ Returns hierarchical symbol list with name, kind, and line numbers.`;
             
             // 修改原因：get_symbols 接收绝对路径时可通过 LSP 读取工作区外文件内容，不受 outside-workspace 读策略管控。
             // 修改方式：与 read_file 一致，入口处校验 outside-workspace 读策略（deny/ask/allow）。
-            const accessError = ensureOutsideWorkspaceAccessApproved('read_file', { paths: pathList }, context);
+            // 使用真实工具名：服务层白名单（toolCallNeedsOutsideWorkspaceConfirmation）已包含 get_symbols，
+            // ask 策略下确认弹窗可置位 approvedByToolConfirmation，本检查才能放行。
+            const accessError = ensureOutsideWorkspaceAccessApproved('get_symbols', { paths: pathList }, context);
             if (accessError) {
                 return { success: false, error: accessError };
             }

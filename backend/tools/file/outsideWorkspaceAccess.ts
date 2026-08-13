@@ -32,7 +32,10 @@ export type OutsideWorkspaceAwareToolName =
     | 'create_directory'
     | 'insert_code'
     | 'delete_code'
-    | 'search_in_files';
+    | 'search_in_files'
+    | 'get_symbols'
+    | 'goto_definition'
+    | 'find_references';
 
 const OUTSIDE_WORKSPACE_AWARE_TOOLS = new Set<string>([
     'read_file',
@@ -43,7 +46,19 @@ const OUTSIDE_WORKSPACE_AWARE_TOOLS = new Set<string>([
     'create_directory',
     'insert_code',
     'delete_code',
-    'search_in_files'
+    'search_in_files',
+    'get_symbols',
+    'goto_definition',
+    'find_references'
+]);
+
+/** 只读类工具名（读策略 deny/ask/allow 与「Reading/read」文案） */
+const READ_ONLY_OUTSIDE_WORKSPACE_TOOLS = new Set<string>([
+    'read_file',
+    'list_files',
+    'get_symbols',
+    'goto_definition',
+    'find_references'
 ]);
 
 /** 自身带 diff 审阅确认层的写类工具 */
@@ -92,14 +107,14 @@ function getPolicy(
     settingsManager?: SettingsManager,
     args?: Record<string, unknown>
 ): OutsideWorkspaceReadAccess | OutsideWorkspaceWriteAccess {
-    // 只读工具（read_file/list_files）共用 read_file 的 deny/ask/allow 策略
-    if (toolName === 'read_file' || toolName === 'list_files') {
+    // 只读工具（list_files / LSP 三工具）与 read_file 一样沿用读策略（deny/ask/allow）
+    if (READ_ONLY_OUTSIDE_WORKSPACE_TOOLS.has(toolName)) {
         return getReadPolicy(settingsManager);
     }
 
     // search_in_files 读写模式混合：search 只读沿用读策略，replace 写入沿用写策略
     if (toolName === 'search_in_files') {
-        return (args as any)?.mode === 'replace'
+        return args?.mode === 'replace'
             ? getWritePolicy(toolName, settingsManager)
             : getReadPolicy(settingsManager);
     }
@@ -121,17 +136,17 @@ function extractCandidatePaths(toolName: OutsideWorkspaceAwareToolName, args: Re
 
     // delete_file/create_directory/list_files：paths 字符串数组（list_files 另兼容单 path）
     if (toolName === 'delete_file' || toolName === 'create_directory' || toolName === 'list_files') {
-        const fromArray = extractNonEmptyStrings((args as any).paths);
+        const fromArray = extractNonEmptyStrings(args.paths);
         if (fromArray.length > 0) {
             return fromArray;
         }
-        const single = (args as any).path;
+        const single = args.path;
         return typeof single === 'string' && single.trim().length > 0 ? [single] : [];
     }
 
     // insert_code/delete_code：files[].path
     if (toolName === 'insert_code' || toolName === 'delete_code') {
-        const files = (args as any).files;
+        const files = args.files;
         if (!Array.isArray(files)) {
             return [];
         }
@@ -140,8 +155,13 @@ function extractCandidatePaths(toolName: OutsideWorkspaceAwareToolName, args: Re
             .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
     }
 
+    // get_symbols：paths 字符串数组（批量符号查询）
+    if (toolName === 'get_symbols') {
+        return extractNonEmptyStrings(args.paths);
+    }
+
     if (toolName === 'read_file' || toolName === 'write_file') {
-        const singlePath = (args as any).path;
+        const singlePath = args.path;
         if (typeof singlePath === 'string' && singlePath.trim().length > 0) {
             return [singlePath];
         }
@@ -149,12 +169,12 @@ function extractCandidatePaths(toolName: OutsideWorkspaceAwareToolName, args: Re
         // read_file 的规范 schema 是顶层 path（单文件）与 files（批量）数组；
         // 这里再兼容历史/第三方客户端可能传入的 paths 数组形式，
         // 避免 paths 形式的工作区外读取绕过策略检查
-        const fromPathsArray = extractNonEmptyStrings((args as any).paths);
+        const fromPathsArray = extractNonEmptyStrings(args.paths);
         if (fromPathsArray.length > 0) {
             return fromPathsArray;
         }
 
-        const files = (args as any).files;
+        const files = args.files;
         if (!Array.isArray(files)) {
             return [];
         }
@@ -164,22 +184,22 @@ function extractCandidatePaths(toolName: OutsideWorkspaceAwareToolName, args: Re
             .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
     }
 
-    const singlePath = (args as any).path;
+    const singlePath = args.path;
     return typeof singlePath === 'string' && singlePath.trim().length > 0 ? [singlePath] : [];
 }
 
-function getDeniedBySettingsMessage(toolName: OutsideWorkspaceAwareToolName, filePaths: string[]): string {
-    const isReadOnly = toolName === 'read_file' || toolName === 'list_files';
-    const action = isReadOnly ? 'Reading' : 'Writing';
+function getDeniedBySettingsMessage(toolName: OutsideWorkspaceAwareToolName, filePaths: string[], displayName?: string): string {
+    const name = displayName ?? toolName;
+    const action = READ_ONLY_OUTSIDE_WORKSPACE_TOOLS.has(toolName) ? 'Reading' : 'Writing';
     const target = filePaths.length > 0 ? filePaths.join(', ') : 'outside-workspace path';
-    return `${action} files outside the workspace is disabled in settings for ${toolName}: ${target}`;
+    return `${action} files outside the workspace is disabled in settings for ${name}: ${target}`;
 }
 
-function getRequiresConfirmationMessage(toolName: OutsideWorkspaceAwareToolName, filePaths: string[]): string {
-    const isReadOnly = toolName === 'read_file' || toolName === 'list_files';
-    const action = isReadOnly ? 'read' : 'write';
+function getRequiresConfirmationMessage(toolName: OutsideWorkspaceAwareToolName, filePaths: string[], displayName?: string): string {
+    const name = displayName ?? toolName;
+    const action = READ_ONLY_OUTSIDE_WORKSPACE_TOOLS.has(toolName) ? 'read' : 'write';
     const target = filePaths.length > 0 ? filePaths.join(', ') : 'outside-workspace path';
-    return `${toolName} needs user confirmation before it can ${action} outside-workspace files: ${target}`;
+    return `${name} needs user confirmation before it can ${action} outside-workspace files: ${target}`;
 }
 
 function getApplyDiffConfig(settingsManager?: SettingsManager): Readonly<ApplyDiffToolConfig> {
@@ -215,7 +235,7 @@ function isDiffReviewCoveredForCall(
     if (!DIFF_REVIEW_WRITE_TOOLS.has(toolName)) {
         return false;
     }
-    if (toolName === 'search_in_files' && (args as any)?.mode !== 'replace') {
+    if (toolName === 'search_in_files' && args?.mode !== 'replace') {
         return false;
     }
     return getApplyDiffConfig(settingsManager).autoSave !== true;
@@ -309,18 +329,25 @@ export function getOutsideWorkspaceRejectionReason(
     return check.denied ? check.error || getDeniedBySettingsMessage(toolName, check.paths) : null;
 }
 
+/**
+ * 入口兜底检查：deny 直接报错；ask 且未获服务层确认时报确认文案。
+ *
+ * @param displayName 错误文案中展示的工具名。media 工具借用 read_file/write_file 策略
+ *        （图片工具借用读写策略是设计决定），传真实工具名让用户看到正确的错误文案。
+ */
 export function ensureOutsideWorkspaceAccessApproved(
     toolName: OutsideWorkspaceAwareToolName,
     args: Record<string, unknown> | undefined,
-    context?: ToolContext
+    context?: ToolContext,
+    displayName?: string
 ): string | null {
     const check = getOutsideWorkspaceAccessCheck(toolName, args, undefined, context?.activeWorkspaceUri);
     if (check.denied) {
-        return check.error || getDeniedBySettingsMessage(toolName, check.paths);
+        return check.error || getDeniedBySettingsMessage(toolName, check.paths, displayName);
     }
 
     if (check.requiresConfirmation && context?.approvedByToolConfirmation !== true) {
-        return getRequiresConfirmationMessage(toolName, check.paths);
+        return getRequiresConfirmationMessage(toolName, check.paths, displayName);
     }
 
     return null;

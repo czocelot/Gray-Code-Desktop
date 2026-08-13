@@ -11,6 +11,7 @@ import { getDiffStorageManager } from '../../modules/conversation';
 import { getDiffManager } from '../../core/services/diffManager';
 import type { LockHolder } from '../../core/fileWriteLockManager';
 import type { SearchInFilesToolConfig } from '../../modules/settings/types';
+import { resolveDiffOutcome } from '../file/diff/resolveDiffOutcome';
 import {
     tryGetFileSizeBytes,
     readHeaderBytes,
@@ -19,7 +20,56 @@ import {
 } from './textEncoding';
 import type { TextDetectionResult } from './textEncoding';
 import { clampNonNegativeNumber, truncateWithEllipsis, FILE_SCAN_CONCURRENCY } from './searchPass';
-import type { SearchMatch } from './searchPass';
+import type { SearchMatch, SkippedFileInfo } from './searchPass';
+
+export type { SkippedFileInfo };
+
+/**
+ * 展开替换模板中的 $-引用（ECMA-262 GetSubstitution 语义：$$、$&、$`、$'、$n、$nn、$<name>），
+ * 仅用于「替换是否产生实际变化」的逐匹配计数（发现 06）。
+ *
+ * 为什么不改真实替换：真实替换仍走 String.prototype.replace 的原生展开，
+ * 本函数只做计数，任何边缘差异最多影响计数精度，不影响落盘内容。
+ */
+export function expandReplacementTemplate(
+    replacement: string,
+    matchText: string,
+    matchIndex: number,
+    fullText: string,
+    captureGroups: Array<string | undefined>,
+    namedGroups?: Record<string, string | undefined>
+): string {
+    const preceding = fullText.slice(0, matchIndex);
+    const following = fullText.slice(matchIndex + matchText.length);
+
+    return replacement.replace(/\$(\$|&|`|'|\d{1,2}|<[^>]+>)/g, (token, ref: string) => {
+        switch (ref) {
+            case '$': return '$';
+            case '&': return matchText;
+            case '`': return preceding;
+            case "'": return following;
+        }
+
+        if (ref.startsWith('<')) {
+            // 命名组：存在但未参与匹配 → 空串；不存在 → 保留字面 $<name>
+            const name = ref.slice(1, -1);
+            if (namedGroups && Object.prototype.hasOwnProperty.call(namedGroups, name)) {
+                return namedGroups[name] ?? '';
+            }
+            return token;
+        }
+
+        // 数字引用：按规范，首数字为 0 或捕获组少于 10 时只消费一位
+        const consumeOne = ref[0] === '0' || captureGroups.length < 10;
+        const digits = consumeOne ? ref[0] : ref;
+        const rest = consumeOne && ref.length > 1 ? ref.slice(1) : '';
+        const n = Number(digits);
+        if (n === 0 || n > captureGroups.length) {
+            return `$${digits}${rest}`;
+        }
+        return (captureGroups[n - 1] ?? '') + rest;
+    });
+}
 
 /**
  * 替换模式 matches 收集预算上限：防止 maxFiles×高频 query 产生数百万条匹配全量回传
@@ -45,17 +95,6 @@ export interface ReplaceResult {
  * 在单个目录中搜索并替换
  * 使用 DiffManager 创建待审阅的 diff
  */
-/**
- * 替换模式下被跳过的文件及原因。
- *
- * 为什么需要：以前文件处理异常被静默吞掉，模型看到的结果是
- * “这个文件没有匹配”，实际是“处理失败”，导致结果与现实对不上。
- */
-export interface SkippedFileInfo {
-    file: string;
-    reason: string;
-}
-
 export async function searchAndReplaceInDirectory(
     searchRoot: vscode.Uri,
     filePattern: string,
@@ -120,6 +159,8 @@ export async function searchAndReplaceInDirectory(
         originalText: string;
         newText: string;
         fileReplacementCount: number;
+        /** 实际产生内容变化的替换数（发现 06：与 replacePass 计数修复对齐） */
+        fileChangedReplacementCount: number;
         localMatches: SearchMatch[];
     }
     type ReplaceScanResult = ReplaceScanEntry | { kind: 'noop' } | { kind: 'skipped'; info: SkippedFileInfo };
@@ -206,6 +247,9 @@ export async function searchAndReplaceInDirectory(
             };
 
             let fileReplacementCount = 0;
+            // 实际内容发生变化的替换数（发现 06）：逐匹配展开替换模板比对原文，
+            // “替换文本与原文相同”的无变化匹配不计入，与 filesModified 语义一致。
+            let fileChangedReplacementCount = 0;
             let match;
             searchRegex.lastIndex = 0;
 
@@ -234,6 +278,20 @@ export async function searchAndReplaceInDirectory(
 
                 fileReplacementCount++;
 
+                // 计数用展开：与下方实际执行的 String.prototype.replace 使用同一 replacement，
+                // 展开结果与原文一致说明该匹配不会产生任何内容变化。
+                const expanded = expandReplacementTemplate(
+                    replacement,
+                    rawMatchText,
+                    match.index,
+                    originalText,
+                    match.slice(1) as Array<string | undefined>,
+                    match.groups as Record<string, string | undefined> | undefined
+                );
+                if (expanded !== rawMatchText) {
+                    fileChangedReplacementCount++;
+                }
+
                 // 防止空匹配导致死循环
                 if (rawMatchText.length === 0) {
                     searchRegex.lastIndex++;
@@ -254,6 +312,7 @@ export async function searchAndReplaceInDirectory(
                     originalText,
                     newText,
                     fileReplacementCount,
+                    fileChangedReplacementCount,
                     localMatches
                 };
             }
@@ -306,12 +365,12 @@ export async function searchAndReplaceInDirectory(
 
         processedFiles++;
 
-        const { fileUri, relativePath, originalText, newText, fileReplacementCount, localMatches } = scan;
+        const { fileUri, relativePath, originalText, newText, fileReplacementCount, fileChangedReplacementCount, localMatches } = scan;
 
         // 按原文件顺序收拢 matches（扫描阶段已按全局预算收集）
         matches.push(...localMatches);
 
-        totalReplacements += fileReplacementCount;
+        totalReplacements += fileChangedReplacementCount;
 
         let diffContentId: string | undefined;
         let status: 'accepted' | 'rejected' | 'pending' = 'pending';
@@ -381,7 +440,7 @@ export async function searchAndReplaceInDirectory(
         replacements.push({
             file: relativePath,
             workspace: workspaceName || undefined,
-            replacements: fileReplacementCount,
+            replacements: fileChangedReplacementCount,
             status,
             diffContentId,
             autoSaveError,

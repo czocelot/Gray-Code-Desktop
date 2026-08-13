@@ -43,13 +43,15 @@ describe('parseXMLToolCalls - tool_name 形态容错', () => {
         expect(calls[0].name).toBe('read_file');
     });
 
-    test('tool_name 为空时跳过该调用', () => {
+    test('tool_name 为空时生成 malformed 反馈（不再静默跳过）', () => {
         const calls = parseXMLToolCalls(`<tool_use>
   <tool_name></tool_name>
   <parameters><path>a.txt</path></parameters>
 </tool_use>`);
 
-        expect(calls).toHaveLength(0);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].name).toBe('malformed_tool_call');
+        expect(calls[0].args.__toolCallParseError).toBeDefined();
     });
 });
 
@@ -259,12 +261,26 @@ describe('parseXMLToolCalls - 安全与字符串语义（F-01）', () => {
 </tool_use>`;
 
         let calls: XMLToolCall[] = [];
-        expect(() => { calls = parseXMLToolCalls(xml); }).not.toThrow();
+        // 超深嵌套会触发 fast-xml-parser 的 maxNestedTags 保护：块被丢弃且
+        // parseXMLToolCalls 打印告警（不抛异常）。静默断言，避免全量测试把
+        // 预期的防御性告警计为失败输出。
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            expect(() => { calls = parseXMLToolCalls(xml); }).not.toThrow();
+        } finally {
+            warnSpy.mockRestore();
+        }
         expect(Array.isArray(calls)).toBe(true);
     });
 
     test('危险键名（__proto__ / constructor）被解析器安全拒绝，无原型污染', () => {
-        const calls = parseXMLToolCalls(`<tool_use>
+        // 危险键名触发 fast-xml-parser 5.x 的 [SECURITY] 拒绝并打印告警
+        // （parseXMLToolCalls 的预期防御行为）。静默断言，避免全量测试把
+        // 预期的防御性告警计为失败输出。
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        let calls: XMLToolCall[] = [];
+        try {
+            calls = parseXMLToolCalls(`<tool_use>
   <tool_name>write_file</tool_name>
   <parameters>
     <__proto__><polluted>yes</polluted></__proto__>
@@ -273,6 +289,9 @@ describe('parseXMLToolCalls - 安全与字符串语义（F-01）', () => {
     <content>safe</content>
   </parameters>
 </tool_use>`);
+        } finally {
+            warnSpy.mockRestore();
+        }
 
         // fast-xml-parser 5.x 对危险键名直接拒绝整个块（[SECURITY] 错误），
         // 参数对象不可能被污染；DANGEROUS_OBJECT_KEYS 是协议层的第二道防线

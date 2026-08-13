@@ -7,33 +7,24 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { getWorkspaceRoot, getAllWorkspaces, getWorkspaceByUri, toRelativePath, countTextFileLines, mapWithConcurrency } from '../utils';
 import { getGlobalSettingsManager } from '../../core/settingsContext';
-
-/**
- * 默认排除模式
- */
-const DEFAULT_EXCLUDE = '**/node_modules/**';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+import { buildExcludePattern, DEFAULT_EXCLUDE_PATTERN } from '../shared/globUtils';
 
 /**
  * 获取排除模式
  *
  * 从设置管理器获取用户配置的排除模式，如果未配置则使用默认值
- * 将多个模式合并为单个 glob 模式（用大括号语法）
+ * 将多个模式合并为单个 glob 模式（用大括号语法）。
+ * 实现已收敛到 shared/globUtils.buildExcludePattern（发现 11）。
  */
 function getExcludePattern(): string {
     const settingsManager = getGlobalSettingsManager();
-    if (settingsManager) {
-        const config = settingsManager.getFindFilesConfig();
-        if (config.excludePatterns && config.excludePatterns.length > 0) {
-            // 多个模式用 {} 语法组合
-            if (config.excludePatterns.length === 1) {
-                return config.excludePatterns[0];
-            }
-            return `{${config.excludePatterns.join(',')}}`;
-        }
-    }
-    return DEFAULT_EXCLUDE;
+    const config = settingsManager ? settingsManager.getFindFilesConfig() : undefined;
+    return buildExcludePattern(config?.excludePatterns, DEFAULT_EXCLUDE_PATTERN);
 }
 
 /**
@@ -60,6 +51,16 @@ interface FindResult {
     count?: number;
     truncated?: boolean;
     error?: string;
+}
+
+/**
+ * find_files 的规范化参数形状（pattern 为向后兼容字段）。
+ */
+interface FindFilesArgs {
+    patterns?: string[];
+    pattern?: string;
+    exclude?: string;
+    maxResults?: number;
 }
 
 /**
@@ -199,7 +200,13 @@ async function findWithPattern(
 export function createFindFilesTool(): Tool {
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
     
+    const arrayFormatNote = isZh
+        ? '\n\n重要：patterns 参数必须是数组，即使只有一个模式也要写成 {"patterns": ["*.ts"]}，不要写成 {"pattern": "*.ts"}。'
+        : '\n\nImportant: the patterns parameter must be an array, even for a single pattern, e.g., {"patterns": ["*.ts"]}, NOT {"pattern": "*.ts"}.';
+
     return {
         declaration: {
             name: 'find_files',
@@ -208,8 +215,12 @@ export function createFindFilesTool(): Tool {
             // 修改方式：主描述说明 glob、fileDetails.lineCount、数组参数和多根工作区规则，参数描述也同步中文化。
             // 修改目的：减少中文会话中模型误用 pattern 单字符串或忽略行数元数据的概率。
             description: isMultiRoot
-                ? `根据一个或多个 glob 模式查找文件。结果会保留 files 字符串数组，并额外返回 fileDetails；其中可统计的文本文件会带 lineCount 行数，便于决定是否用 read_file 范围读取。当前是多根工作区，结果会带工作区前缀。可用工作区：${workspaces.map(w => w.name).join(', ')}。\n\n重要：patterns 参数必须是数组，即使只有一个模式也要写成 {"patterns": ["*.ts"]}，不要写成 {"pattern": "*.ts"}。`
-                : '根据一个或多个 glob 模式查找文件。结果会保留 files 字符串数组，并额外返回 fileDetails；其中可统计的文本文件会带 lineCount 行数，便于决定是否用 read_file 范围读取。\n\n重要：patterns 参数必须是数组，即使只有一个模式也要写成 {"patterns": ["*.ts"]}，不要写成 {"pattern": "*.ts"}。',
+                ? isZh
+                    ? `根据一个或多个 glob 模式查找文件。结果会保留 files 字符串数组，并额外返回 fileDetails；其中可统计的文本文件会带 lineCount 行数，便于决定是否用 read_file 范围读取。当前是多根工作区，结果会带工作区前缀。可用工作区：${workspaces.map(w => w.name).join(', ')}。${arrayFormatNote}`
+                    : `Find files by one or more glob patterns. The result keeps the files string array and additionally returns fileDetails; text files that can be counted include a lineCount, to help decide whether to use read_file with a line range. This is a multi-root workspace, so results are prefixed with the workspace name. Available workspaces: ${workspaces.map(w => w.name).join(', ')}.${arrayFormatNote}`
+                : isZh
+                    ? `根据一个或多个 glob 模式查找文件。结果会保留 files 字符串数组，并额外返回 fileDetails；其中可统计的文本文件会带 lineCount 行数，便于决定是否用 read_file 范围读取。${arrayFormatNote}`
+                    : `Find files by one or more glob patterns. The result keeps the files string array and additionally returns fileDetails; text files that can be counted include a lineCount, to help decide whether to use read_file with a line range.${arrayFormatNote}`,
             category: 'search',
             parameters: {
                 type: 'object',
@@ -219,16 +230,20 @@ export function createFindFilesTool(): Tool {
                         items: {
                             type: 'string'
                         },
-                        description: '要搜索的 glob 模式数组。即使只有一个模式也必须传数组，例如：["**/*.ts", "src/**/*.js"]。'
+                        description: isZh
+                            ? '要搜索的 glob 模式数组。即使只有一个模式也必须传数组，例如：["**/*.ts", "src/**/*.js"]。'
+                            : 'Array of glob patterns to search. Even a single pattern must be passed as an array, e.g., ["**/*.ts", "src/**/*.js"].'
                     },
                     exclude: {
                         type: 'string',
-                        description: '排除模式，例如："**/node_modules/**"。',
+                        description: isZh
+                            ? '排除模式，例如："**/node_modules/**"。'
+                            : 'Exclude pattern, e.g., "**/node_modules/**".',
                         default: '**/node_modules/**'
                     },
                     maxResults: {
                         type: 'number',
-                        description: '每个模式最多返回多少个结果。',
+                        description: isZh ? '每个模式最多返回多少个结果。' : 'Maximum number of results returned per pattern.',
                         default: 500
                     }
                 },
@@ -236,14 +251,15 @@ export function createFindFilesTool(): Tool {
             }
         },
         handler: async (args, context?: ToolContext): Promise<ToolResult> => {
+            const typed = parseArgs<FindFilesArgs>(args);
             // 支持 patterns 数组或单个 pattern（向后兼容）
             let patternList: string[] = [];
             
-            if (args.patterns && Array.isArray(args.patterns)) {
-                patternList = args.patterns as string[];
-            } else if (args.pattern && typeof args.pattern === 'string') {
+            if (typed.patterns && Array.isArray(typed.patterns)) {
+                patternList = typed.patterns;
+            } else if (typed.pattern && typeof typed.pattern === 'string') {
                 // 向后兼容单个 pattern 参数
-                patternList = [args.pattern];
+                patternList = [typed.pattern];
             }
             
             if (patternList.length === 0) {
@@ -251,9 +267,9 @@ export function createFindFilesTool(): Tool {
             }
 
             // 如果用户指定了 exclude 参数则使用，否则使用配置的默认值
-            const exclude = (args.exclude as string) || getExcludePattern();
+            const exclude = typed.exclude || getExcludePattern();
             // 0/负值/非数字语义混乱（负值会原样传入 findFiles）：统一回退到默认 500，并取整
-            const maxResults = typeof args.maxResults === 'number' && args.maxResults > 0 ? Math.floor(args.maxResults) : 500;
+            const maxResults = typeof typed.maxResults === 'number' && typed.maxResults > 0 ? Math.floor(typed.maxResults) : 500;
 
             const results: FindResult[] = [];
             let successCount = 0;

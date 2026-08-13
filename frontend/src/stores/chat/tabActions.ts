@@ -13,6 +13,7 @@ import { clearPendingDirtyConfirm } from './dirtyConfirmState'
 import { clearAllSmoothForState } from './streamChunkHandlers'
 import { pruneMessageListUiStateByTab } from '../../components/message/messageListUiState'
 import { sendToExtension } from '../../utils/vscode'
+import { t } from '../../composables/useI18n'
 
 /** 最大标签页数量 */
 const MAX_TABS = 100
@@ -220,7 +221,7 @@ export function createTab(
   const tab: TabInfo = {
     id: tabId,
     conversationId: convId,
-    title: options?.title || 'New Chat',
+    title: options?.title || t('components.tabs.newChat'),
     isStreaming: false,
     kind: options?.kind,
     filePath: options?.filePath
@@ -284,7 +285,7 @@ export function closeTab(
       switchTab(state, nextTab.id, cancelStreamAndRejectTools, streamHandlerCtx)
     } else {
       // 没有剩余标签页，创建一个新的
-      const newTabId = createTab(state, { title: 'New Chat', switchTo: false })
+      const newTabId = createTab(state, { title: t('components.tabs.newChat'), switchTo: false })
       if (newTabId) {
         resetConversationState(state)
         state.activeTabId.value = newTabId

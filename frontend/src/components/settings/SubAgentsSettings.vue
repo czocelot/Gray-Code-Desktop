@@ -7,6 +7,10 @@
  * 2. 配置子代理的系统提示词
  * 3. 选择子代理使用的渠道和模型
  * 4. 配置子代理可用的工具列表
+ *
+ * S7 批次拆分（纯结构性拆分，行为零变化）：
+ * - 全局配置 / 基本信息 / 渠道模型 / 工具配置 / 新建对话框 / 重命名对话框拆至 subAgentsSettings/ 子组件；
+ * - 本组件只保留状态、动作与编排，子组件仅通过 props 通信。
  */
 
 import { MESSAGE_NAMES } from '@shared/protocol'
@@ -16,70 +20,16 @@ import { sendToExtension } from '@/utils/vscode'
 import { useI18n } from '@/i18n'
 import type { ModelInfo } from '@/types'
 import { getChannelModels } from '@/services/config'
-import { getToolDisplayName, getToolDescription } from '@/utils/toolLocalization'
-import { groupToolsByCategory, getCategoryName, getCategoryIcon } from '@/utils/toolCategory'
-import { isMcpToolName } from '@/utils/tools/mcp/mcpToolNameCodec'
+import { groupToolsByCategory } from '@/utils/toolCategory'
+import type { SubAgentConfig, SubAgentToolsConfig } from '@/types'
+import SubAgentBasicInfoSection from './subAgentsSettings/SubAgentBasicInfoSection.vue'
+import SubAgentChannelModelSection from './subAgentsSettings/SubAgentChannelModelSection.vue'
+import SubAgentToolsSection from './subAgentsSettings/SubAgentToolsSection.vue'
+import CreateSubAgentDialog from './subAgentsSettings/CreateSubAgentDialog.vue'
+import RenameSubAgentDialog from './subAgentsSettings/RenameSubAgentDialog.vue'
+import type { ChannelConfig, ToolInfo, SubAgentPreset } from './subAgentsSettings/types'
 
 const { t } = useI18n()
-
-// ==================== 类型定义 ====================
-
-// 子代理工具配置
-interface SubAgentToolsConfig {
-  mode: 'all' | 'builtin' | 'mcp' | 'whitelist' | 'blacklist'
-  whitelist?: string[]
-  blacklist?: string[]
-  includeMcp?: boolean
-}
-
-// 子代理配置
-interface SubAgentConfig {
-  type: string
-  name: string
-  description: string
-  systemPrompt: string
-  channel: {
-    channelId: string
-    modelId?: string
-    syncWithCurrentModel?: boolean
-  }
-  tools: SubAgentToolsConfig
-  maxIterations?: number
-  maxRuntime?: number
-  enabled?: boolean
-}
-
-// 渠道配置
-interface ChannelConfig {
-  id: string
-  name: string
-  type: string
-  enabled: boolean
-  model: string
-  models: ModelInfo[]
-}
-
-// 工具信息
-interface ToolInfo {
-  name: string
-  description: string
-  category?: string
-  source: 'builtin' | 'mcp'
-  serverId?: string
-  serverName?: string
-}
-
-// 预设模板（与后端 backend/tools/subagents/presets.ts 同构）
-interface SubAgentPreset {
-  presetId: string
-  defaultName: string
-  defaultDescription: string
-  icon: string
-  systemPrompt: string
-  tools: SubAgentToolsConfig
-  maxIterations?: number
-  maxRuntime?: number
-}
 
 // ==================== 状态 ====================
 
@@ -164,7 +114,7 @@ const isLoadingTools = ref(false)
 // ==================== 计算属性 ====================
 
 // 当前选中的子代理
-const currentAgent = computed(() => 
+const currentAgent = computed(() =>
   subAgents.value.find(a => a.type === currentAgentType.value)
 )
 
@@ -239,16 +189,6 @@ watch(
   }
 )
 
-// 渠道切换：自动选中新渠道的默认模型（不再强制清空 modelId）
-async function handleChannelChange(channelId: string) {
-  const cfg = channels.value.find(c => c.id === channelId) as any
-  const defaultModel = (cfg?.model || '').trim()
-  await updateAgentField('channel', {
-    ...currentAgent.value?.channel,
-    channelId,
-    modelId: defaultModel || ''
-  })
-}
 
 // 当前代理是否勾选「与当前模型同步」：勾选后忽略自身固定渠道/模型，运行时使用当前会话渠道与模型
 const currentAgentSyncsWithCurrent = computed(() =>
@@ -286,11 +226,11 @@ function isToolSelected(toolName: string): boolean {
 // 切换工具选中状态
 async function toggleTool(toolName: string, selected: boolean) {
   if (!currentAgent.value) return
-  
+
   const mode = currentAgent.value.tools.mode
   const listKey = mode === 'whitelist' ? 'whitelist' : 'blacklist'
   const currentList = [...(currentAgent.value.tools[listKey] || [])]
-  
+
   if (selected) {
     if (!currentList.includes(toolName)) {
       currentList.push(toolName)
@@ -301,16 +241,11 @@ async function toggleTool(toolName: string, selected: boolean) {
       currentList.splice(index, 1)
     }
   }
-  
+
   await updateAgentField('tools', {
     ...currentAgent.value.tools,
     [listKey]: currentList
   })
-}
-
-// 判断是否为 MCP 工具（category 标记或编码名前缀均可识别）
-function isMcpTool(tool: ToolInfo): boolean {
-  return tool.category === 'mcp' || isMcpToolName(tool.name)
 }
 
 // ==================== 方法 ====================
@@ -373,14 +308,14 @@ async function loadChannels() {
   try {
     const ids = await sendToExtension<string[]>(MESSAGE_NAMES['config.listConfigs'], {})
     const loadedChannels: ChannelConfig[] = []
-    
+
     for (const id of ids || []) {
       const config = await sendToExtension<ChannelConfig>(MESSAGE_NAMES['config.getConfig'], { configId: id })
       if (config) {
         loadedChannels.push(config)
       }
     }
-    
+
     channels.value = loadedChannels
   } catch (error) {
     console.error('Failed to load channels:', error)
@@ -399,7 +334,7 @@ async function loadTools() {
       ...t,
       source: 'builtin' as const
     }))
-    
+
     // 加载 MCP 工具
     const mcpResponse = await sendToExtension<{ tools: any[] }>(MESSAGE_NAMES['tools.getMcpTools'], {})
     const mcpTools: ToolInfo[] = (mcpResponse?.tools || []).map(t => ({
@@ -410,12 +345,12 @@ async function loadTools() {
       serverId: t.serverId,
       serverName: t.serverName
     }))
-    
+
     allTools.value = [...builtinTools, ...mcpTools]
   } catch (error) {
     console.error('Failed to load tools:', error)
   } finally {
-isLoadingTools.value = false
+    isLoadingTools.value = false
   }
 }
 
@@ -434,20 +369,20 @@ function selectAgent(agentType: string) {
  * 乐观更新：先合并到本地再发请求，避免保存往返窗口内连续编辑互相覆盖（对象字段做字段级
  * 合并，不整体替换，防止丢 channel.modelId/syncWithCurrentModel）；保存失败时回滚本地。
  */
-async function updateAgentField(field: string, value: any): Promise<{ ok: boolean; error?: unknown }> {
+async function updateAgentField<K extends keyof SubAgentConfig>(field: K, value: unknown): Promise<{ ok: boolean; error?: unknown }> {
   if (!currentAgent.value) return { ok: false }
 
   // await 前捕获代理类型并按 agentType 定位本地对象：往返期间用户可能切换代理，
   // 本地合并始终落到捕获的旧代理上，不会污染新选中的代理
   const agentType = currentAgentType.value
   const agent = subAgents.value.find(a => a.type === agentType)
-  const previous = agent ? (agent as any)[field] : undefined
+  const previous = agent ? agent[field] : undefined
 
   if (agent) {
     const next = isPlainObject(previous) && isPlainObject(value)
-      ? { ...previous, ...value }
+      ? { ...(previous as Record<string, unknown>), ...value }
       : value
-    ;(agent as any)[field] = next
+    agent[field] = next as SubAgentConfig[K]
   }
 
   try {
@@ -462,7 +397,7 @@ async function updateAgentField(field: string, value: any): Promise<{ ok: boolea
     // 保存失败：回滚本地状态，避免 UI 显示已保存而实际未写入
     const rollbackTarget = subAgents.value.find(a => a.type === agentType)
     if (rollbackTarget) {
-      ;(rollbackTarget as any)[field] = previous
+      rollbackTarget[field] = previous as SubAgentConfig[K]
     }
     console.error('Failed to update subagent:', error)
     saveError.value = errorText(error)
@@ -483,6 +418,29 @@ async function toggleSyncWithCurrentModel(value: boolean) {
     syncWithCurrentModel: value
   })
 }
+
+// 子组件回调：基本信息字段更新
+function handleBasicFieldUpdate(field: 'description' | 'maxIterations' | 'maxRuntime' | 'enabled', value: unknown) {
+  void updateAgentField(field, value)
+}
+
+// 子组件回调：工具配置更新（保持原 { ...tools, mode } 字段级合并语义）
+function handleUpdateTools(tools: SubAgentToolsConfig) {
+  void updateAgentField('tools', tools)
+}
+
+// 子组件回调：选择渠道（切渠道时清空模型选择）
+function handleSelectChannel(channelId: string) {
+  if (!currentAgent.value) return
+  void updateAgentField('channel', { ...currentAgent.value.channel, channelId, modelId: '' })
+}
+
+// 子组件回调：选择模型
+function handleSelectModel(modelId: string) {
+  if (!currentAgent.value) return
+  void updateAgentField('channel', { ...currentAgent.value.channel, modelId })
+}
+
 
 // 全局数字输入非法提示（就地校验并提示，不再静默回退默认值）
 const globalNumberError = ref('')
@@ -534,6 +492,11 @@ function openCreateDialog() {
   // 默认选中第一个可用渠道，创建后可在编辑界面调整
   newAgentChannelId.value = channelOptions.value[0]?.value || ''
   showNewDialog.value = true
+}
+
+// 关闭新建对话框
+function closeCreateDialog() {
+  showNewDialog.value = false
 }
 
 // 加载预设模板列表
@@ -591,12 +554,12 @@ function generateAgentTypeId(): string {
 // 创建子代理
 async function createAgent() {
   const trimmedName = newAgentName.value.trim()
-  
+
   if (!trimmedName) {
     createError.value = t('components.settings.subagents.createDialog.nameRequired')
     return
   }
-  
+
   // 本地检查名称是否重复
   const nameExists = subAgents.value.some(
     a => a.name.toLowerCase() === trimmedName.toLowerCase()
@@ -605,13 +568,13 @@ async function createAgent() {
     createError.value = t('components.settings.subagents.createDialog.nameDuplicate')
     return
   }
-  
+
   isCreating.value = true
   createError.value = ''
-  
+
   // 自动生成类型 ID
   const agentTypeId = generateAgentTypeId()
-  
+
   try {
     // 选中模板时预填全部字段；description/systemPrompt 使用英文原文（面向模型），UI 展示才用本地化文案
     const preset = presets.value.find(p => p.presetId === selectedPresetId.value)
@@ -631,7 +594,7 @@ async function createAgent() {
       enabled: true
     }))
     await sendToExtension(MESSAGE_NAMES['subagents.create'], payload)
-    
+
     // 重新加载并选中新创建的
     await loadSubAgents()
     currentAgentType.value = agentTypeId
@@ -660,12 +623,12 @@ function startRename() {
 // 保存重命名
 async function saveRename() {
   const trimmedName = editingName.value.trim()
-  
+
   if (!trimmedName) {
     isEditing.value = false
     return
   }
-  
+
   // 检查名称是否重复（排除当前代理）
   const nameExists = subAgents.value.some(
     a => a.type !== currentAgentType.value && a.name.toLowerCase() === trimmedName.toLowerCase()
@@ -674,7 +637,7 @@ async function saveRename() {
     renameError.value = t('components.settings.subagents.createDialog.nameDuplicate')
     return
   }
-  
+
   const result = await updateAgentField('name', trimmedName)
   if (result.ok) {
     isEditing.value = false
@@ -702,7 +665,7 @@ function cancelRename() {
 // 删除子代理
 async function deleteAgent() {
   if (!deleteAgentType.value) return
-  
+
   try {
     await sendToExtension(MESSAGE_NAMES['subagents.delete'], { type: deleteAgentType.value })
 
@@ -741,7 +704,7 @@ onMounted(async () => {
       <i class="codicon codicon-loading codicon-modifier-spin"></i>
       <span>{{ t('common.loading') }}</span>
     </div>
-    
+
     <!-- 主内容 -->
     <div v-else class="settings-content">
       <!-- 保存失败提示：配置写入被后端拒绝时不再静默 -->
@@ -809,6 +772,7 @@ onMounted(async () => {
         </div>
       </div>
       
+
       <!-- 子代理选择器 -->
       <div class="agent-selector" data-search-anchor="subagents-selector">
         <CustomSelect
@@ -821,23 +785,23 @@ onMounted(async () => {
         <div v-else class="no-agents">
           <span>{{ t('components.settings.subagents.noAgents') }}</span>
         </div>
-        
+
         <!-- 操作按钮 -->
         <div class="agent-actions">
           <button class="action-btn" @click="openCreateDialog" :title="t('components.settings.subagents.create')">
             <i class="codicon codicon-add"></i>
           </button>
-          <button 
-            v-if="currentAgent" 
-            class="action-btn" 
+          <button
+            v-if="currentAgent"
+            class="action-btn"
             @click="startRename"
             :title="t('components.settings.subagents.rename')"
           >
             <i class="codicon codicon-edit"></i>
           </button>
-          <button 
-            v-if="currentAgent" 
-            class="action-btn danger" 
+          <button
+            v-if="currentAgent"
+            class="action-btn danger"
             @click="showDeleteConfirm = true; deleteAgentType = currentAgentType"
             :title="t('components.settings.subagents.delete')"
           >
@@ -845,56 +809,15 @@ onMounted(async () => {
           </button>
         </div>
       </div>
-      
+
       <!-- 代理配置表单 -->
       <div v-if="currentAgent" class="agent-config">
         <!-- 基本信息 -->
-        <div class="config-section" data-search-anchor="subagents-basic-info">
-          <h5>{{ t('components.settings.subagents.basicInfo') }}</h5>
-          
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.description') }}</label>
-            <input
-              type="text"
-              :value="currentAgent.description"
-              @change="updateAgentField('description', ($event.target as HTMLInputElement).value)"
-              :placeholder="t('components.settings.subagents.descriptionPlaceholder')"
-            />
-          </div>
-          
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label>{{ t('components.settings.subagents.maxIterations') }}</label>
-              <input
-                type="number"
-                :value="currentAgent.maxIterations ?? 50"
-                min="-1"
-                @change="updateAgentField('maxIterations', parseInt(($event.target as HTMLInputElement).value) || 50)"
-              />
-              <span class="field-hint">{{ t('components.settings.subagents.maxIterationsHint') }}</span>
-            </div>
-            
-            <div class="form-group flex-1">
-              <label>{{ t('components.settings.subagents.maxRuntime') }}</label>
-              <input
-                type="number"
-                :value="currentAgent.maxRuntime ?? 1800"
-                min="-1"
-                @change="updateAgentField('maxRuntime', parseInt(($event.target as HTMLInputElement).value) || 1800)"
-              />
-              <span class="field-hint">{{ t('components.settings.subagents.maxRuntimeHint') }}</span>
-            </div>
-          </div>
-          
-          <div class="form-group">
-            <CustomCheckbox
-              :modelValue="currentAgent.enabled !== false"
-              :label="t('components.settings.subagents.enabled')"
-              @update:modelValue="updateAgentField('enabled', $event)"
-            />
-          </div>
-        </div>
-        
+        <SubAgentBasicInfoSection
+          :agent="currentAgent"
+          :on-update-field="handleBasicFieldUpdate"
+        />
+
         <!-- 系统提示词 -->
         <div class="config-section" data-search-anchor="subagents-system-prompt">
           <h5>{{ t('components.settings.subagents.systemPrompt') }}</h5>
@@ -906,110 +829,30 @@ onMounted(async () => {
             rows="6"
           ></textarea>
         </div>
-        
-        <!-- 渠道和模型 -->
-        <div class="config-section" data-search-anchor="subagents-channel-model">
-          <h5>{{ t('components.settings.subagents.channelModel') }}</h5>
 
-          <div class="form-group">
-            <CustomCheckbox
-              :modelValue="currentAgentSyncsWithCurrent"
-              :label="t('components.settings.subagents.syncWithCurrentModel')"
-              :hint="currentAgentSyncsWithCurrent ? '' : t('components.settings.subagents.syncWithCurrentModelHint')"
-              @update:modelValue="toggleSyncWithCurrentModel"
-            />
-          </div>
-          <p v-if="currentAgentSyncsWithCurrent" class="field-hint">{{ t('components.settings.subagents.syncWithCurrentModelActiveHint') }}</p>
-          
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label>{{ t('components.settings.subagents.channel') }}</label>
-              <CustomSelect
-                :modelValue="currentAgent.channel.channelId"
-                :options="channelOptions"
-                :placeholder="t('components.settings.subagents.selectChannel')"
-                :disabled="currentAgentSyncsWithCurrent"
-                @update:modelValue="handleChannelChange"
-              />
-            </div>
-            
-            <div class="form-group flex-1">
-              <label>{{ t('components.settings.subagents.model') }}</label>
-              <CustomSelect
-                :modelValue="currentAgent.channel.modelId || ''"
-                :options="modelOptions"
-                :placeholder="t('components.settings.subagents.selectModel')"
-                :disabled="currentAgentSyncsWithCurrent || !selectedChannel"
-                @update:modelValue="updateAgentField('channel', { ...currentAgent.channel, modelId: $event })"
-              />
-            </div>
-          </div>
-        </div>
-        
+        <!-- 渠道和模型 -->
+        <SubAgentChannelModelSection
+          :agent="currentAgent"
+          :syncs-with-current="currentAgentSyncsWithCurrent"
+          :selected-channel="selectedChannel"
+          :channel-options="channelOptions"
+          :model-options="modelOptions"
+          :on-toggle-sync="toggleSyncWithCurrentModel"
+          :on-select-channel="handleSelectChannel"
+          :on-select-model="handleSelectModel"
+        />
         <!-- 工具配置 -->
-        <div class="config-section" data-search-anchor="subagents-tools">
-          <h5>{{ t('components.settings.subagents.tools') }}</h5>
-          <p class="section-description">{{ t('components.settings.subagents.toolsDescription') }}</p>
-          
-          <!-- 工具模式选择 -->
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.toolMode.label') }}</label>
-            <CustomSelect
-              :modelValue="currentAgent.tools.mode"
-              :options="toolModeOptions"
-              @update:modelValue="updateAgentField('tools', { ...currentAgent.tools, mode: $event })"
-            />
-          </div>
-          
-          <!-- 工具列表（白名单/黑名单模式） -->
-          <div 
-            v-if="currentAgent.tools.mode === 'whitelist' || currentAgent.tools.mode === 'blacklist'" 
-            class="tools-list"
-          >
-            <!-- 模式说明 -->
-            <div class="tools-mode-hint">
-              <i class="codicon codicon-info"></i>
-              <span v-if="currentAgent.tools.mode === 'whitelist'">{{ t('components.settings.subagents.whitelistHint') }}</span>
-              <span v-else>{{ t('components.settings.subagents.blacklistHint') }}</span>
-            </div>
-            
-            <!-- 按分类分组的工具列表 -->
-            <div v-for="(categoryTools, category) in toolsByCategory" :key="category" class="tool-category">
-              <div class="category-header">
-                <i :class="['codicon', getCategoryIcon(category)]"></i>
-                <span>{{ getCategoryName(category) }}</span>
-                <span class="tool-count">{{ categoryTools.length }}</span>
-              </div>
-              <div class="tool-items">
-                <div v-for="tool in categoryTools" :key="tool.name" class="tool-item" :title="getToolDescription(tool.name, tool.description)">
-                  <div class="tool-info">
-                    <div class="tool-name-row">
-                      <span class="tool-name" :title="isMcpTool(tool) ? tool.name : undefined">{{ getToolDisplayName(tool.name) }}</span>
-                      <span v-if="isMcpTool(tool)" class="mcp-badge">
-                        <i class="codicon codicon-plug"></i>
-                        {{ tool.serverName }}
-                      </span>
-                      <span v-if="!isMcpTool(tool)" class="tool-id">{{ tool.name }}</span>
-                    </div>
-                    <div class="tool-description">{{ getToolDescription(tool.name, tool.description) }}</div>
-                  </div>
-                  <CustomCheckbox
-                    :modelValue="isToolSelected(tool.name)"
-                    @update:modelValue="toggleTool(tool.name, $event)"
-                  />
-                </div>
-              </div>
-            </div>
-            
-            <!-- 空工具列表 -->
-            <div v-if="allTools.length === 0" class="no-tools">
-              <i class="codicon codicon-info"></i>
-              <span>{{ t('components.settings.subagents.noTools') }}</span>
-            </div>
-          </div>
-        </div>
+        <SubAgentToolsSection
+          :agent="currentAgent"
+          :tool-mode-options="toolModeOptions"
+          :tools-by-category="toolsByCategory"
+          :all-tools="allTools"
+          :is-tool-selected="isToolSelected"
+          :on-update-tools="handleUpdateTools"
+          :on-toggle-tool="toggleTool"
+        />
       </div>
-      
+
       <!-- 空状态 -->
       <div v-else-if="!isLoading && subAgents.length === 0" class="empty-state">
         <i class="codicon codicon-hubot"></i>
@@ -1020,131 +863,34 @@ onMounted(async () => {
         </button>
       </div>
     </div>
-    
+
     <!-- 新建对话框 -->
-    <div v-if="showNewDialog" class="dialog-overlay" @click.self="showNewDialog = false">
-      <div class="dialog">
-        <div class="dialog-header">
-          <h4>{{ t('components.settings.subagents.createDialog.title') }}</h4>
-          <button class="close-btn" @click="showNewDialog = false">
-            <i class="codicon codicon-close"></i>
-          </button>
-        </div>
-        
-        <div class="dialog-body">
-          <!-- 预设模板选择：空白 + 内置模板；选中后预填名称/提示词/工具配置，创建后均可在编辑界面调整 -->
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.createDialog.templateLabel') }}</label>
-            <div class="preset-list">
-              <div
-                class="preset-card"
-                :class="{ selected: selectedPresetId === '' }"
-                @click="selectPreset('')"
-              >
-                <i class="codicon codicon-file"></i>
-                <div class="preset-info">
-                  <span class="preset-name">{{ t('components.settings.subagents.presets.blank.name') }}</span>
-                  <span class="preset-desc">{{ t('components.settings.subagents.presets.blank.description') }}</span>
-                </div>
-              </div>
-              <div
-                v-for="preset in presets"
-                :key="preset.presetId"
-                class="preset-card"
-                :class="{ selected: selectedPresetId === preset.presetId }"
-                @click="selectPreset(preset.presetId)"
-              >
-                <i class="codicon" :class="preset.icon"></i>
-                <div class="preset-info">
-                  <span class="preset-name">{{ presetName(preset) }}</span>
-                  <span class="preset-desc">{{ presetDescription(preset) }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
+    <CreateSubAgentDialog
+      v-if="showNewDialog"
+      v-model:new-agent-name="newAgentName"
+      v-model:new-agent-channel-id="newAgentChannelId"
+      :selected-preset-id="selectedPresetId"
+      :presets="presets"
+      :channel-options="channelOptions"
+      :create-error="createError"
+      :is-creating="isCreating"
+      :preset-name="presetName"
+      :preset-description="presetDescription"
+      :on-select-preset="selectPreset"
+      :on-close="closeCreateDialog"
+      :on-create="createAgent"
+    />
 
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.createDialog.nameLabel') }}</label>
-            <input
-              v-model="newAgentName"
-              type="text"
-              :placeholder="t('components.settings.subagents.createDialog.namePlaceholder')"
-              @keyup.enter="createAgent"
-            />
-          </div>
 
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.channel') }}</label>
-            <CustomSelect
-              v-model="newAgentChannelId"
-              :options="channelOptions"
-              :placeholder="t('components.settings.subagents.selectChannel')"
-            />
-          </div>
-
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.model') }}</label>
-            <CustomSelect
-              v-model="newAgentModelId"
-              :options="createDialogModelOptions"
-              :placeholder="t('components.settings.subagents.selectModel')"
-              :disabled="!newAgentChannelId"
-            />
-          </div>
-          
-          <div v-if="createError" class="error-message">
-            {{ createError }}
-          </div>
-        </div>
-        
-        <div class="dialog-footer">
-          <button class="secondary-btn" @click="showNewDialog = false">
-            {{ t('common.cancel') }}
-          </button>
-          <button class="primary-btn" @click="createAgent" :disabled="isCreating">
-            <i v-if="isCreating" class="codicon codicon-loading codicon-modifier-spin"></i>
-            {{ t('common.create') }}
-          </button>
-        </div>
-      </div>
-    </div>
-    
     <!-- 重命名对话框 -->
-    <div v-if="isEditing" class="dialog-overlay" @click.self="cancelRename">
-      <div class="dialog">
-        <div class="dialog-header">
-          <h4>{{ t('components.settings.subagents.rename') }}</h4>
-          <button class="close-btn" @click="cancelRename">
-            <i class="codicon codicon-close"></i>
-          </button>
-        </div>
-        
-        <div class="dialog-body">
-          <div class="form-group">
-            <label>{{ t('components.settings.subagents.createDialog.nameLabel') }}</label>
-            <input
-              v-model="editingName"
-              type="text"
-              @keyup.enter="saveRename"
-            />
-          </div>
-          
-          <div v-if="renameError" class="error-message">
-            {{ renameError }}
-          </div>
-        </div>
-        
-        <div class="dialog-footer">
-          <button class="secondary-btn" @click="cancelRename">
-            {{ t('common.cancel') }}
-          </button>
-          <button class="primary-btn" @click="saveRename">
-            {{ t('common.save') }}
-          </button>
-        </div>
-      </div>
-    </div>
-    
+    <RenameSubAgentDialog
+      v-if="isEditing"
+      v-model:editing-name="editingName"
+      :rename-error="renameError"
+      :on-cancel="cancelRename"
+      :on-save="saveRename"
+    />
+
     <!-- 确认删除对话框 -->
     <ConfirmDialog
       v-model="showDeleteConfirm"
@@ -1283,86 +1029,6 @@ onMounted(async () => {
   color: var(--vscode-foreground);
 }
 
-.section-description {
-  margin: 0;
-  font-size: 12px;
-  color: var(--vscode-descriptionForeground);
-}
-
-/* 表单 */
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.form-group label {
-  font-size: 12px;
-  color: var(--vscode-foreground);
-}
-
-.form-group input,
-.form-group textarea {
-  padding: 6px 10px;
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border);
-  border-radius: 4px;
-  color: var(--vscode-input-foreground);
-  font-size: 13px;
-  font-family: inherit;
-  resize: vertical;
-}
-
-.form-group input:focus,
-.form-group textarea:focus {
-  outline: none;
-  border-color: var(--vscode-focusBorder);
-}
-
-.field-hint {
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-  margin-top: 2px;
-}
-
-/* 全局配置区域 */
-.global-config {
-  margin-bottom: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-/* 全局配置四参数 2×2 布局：一行四个过宽（label/hint 挤成多行），
-   改为两行两列——「并发数/迭代次数」与「队列超时/运行时长」各占一行。
-   双类选择器提升特异性（.form-row 在其后定义，单类会被它的 display:flex 覆盖） */
-.global-config .global-config-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-/* 数字输入框隐藏上下箭头 */
-input[type="number"] {
-  appearance: textfield;
-  -moz-appearance: textfield;
-}
-
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-  appearance: none;
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-.global-config input[type="number"] {
-  width: 100px;
-}
-
-/* Agent 配置中的数字输入框 */
-.agent-config input[type="number"] {
-  width: 120px;
-}
-
 /* 系统提示词编辑框 */
 .system-prompt-textarea {
   width: 100%;
@@ -1387,15 +1053,6 @@ input[type="number"]::-webkit-inner-spin-button {
   outline: none;
   border-color: var(--vscode-focusBorder);
   box-shadow: 0 0 0 1px var(--vscode-focusBorder);
-}
-
-.form-row {
-  display: flex;
-  gap: 12px;
-}
-
-.flex-1 {
-  flex: 1;
 }
 
 /* 空状态 */
@@ -1438,9 +1095,9 @@ input[type="number"]::-webkit-inner-spin-button {
   background: var(--vscode-button-hoverBackground);
 }
 
-.primary-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+/* Loading 动画 */
+.codicon-modifier-spin {
+  animation: spin 1s linear infinite;
 }
 
 .secondary-btn {
@@ -1747,6 +1404,9 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--vscode-descriptionForeground);
   font-size: 12px;
 }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 </style>
-
-

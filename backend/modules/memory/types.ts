@@ -109,12 +109,18 @@ export interface MemoryConfig {
     wakeLines: number;
     /** ENTRY_CHARS: 单条记忆最大字节数 */
     entryChars: number;
+    /** PART_CHARS: 输出分页的最大字符数 */
+    partChars: number;
+    /** PART_LINES: 输出分页的最大行数 */
+    partLines: number;
 }
 
 /** 默认配置 */
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     wakeLines: 96,
     entryChars: 280,
+    partChars: 20000,
+    partLines: 500,
 };
 
 /**
@@ -126,4 +132,5 @@ export const TREE_REC = 288;
 
 /** 最多直接从原始日志压缩的记忆条数 */
 export const RAW_MAX = 16;
+
 

@@ -18,7 +18,11 @@ import { ensureOutsideWorkspaceAccessApproved } from '../file/outsideWorkspaceAc
 import { TaskManager, type TaskEvent } from '../taskManager';
 import { withLinkedAbort } from '../abortLink';
 import { getSharp } from '../../modules/dependencies';
-import { ensureMediaPathsSafe, MEDIA_MAX_INPUT_BYTES } from './pathGuard';
+import { ensureMediaPathsSafe } from './pathGuard';
+import { readImageFile } from './imageUtils';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+import { buildResizeImageDescriptions } from '../localization/dynamicDescriptions';
 
 /** 缩放任务类型常量 */
 const TASK_TYPE_RESIZE = 'resize_image';
@@ -96,50 +100,6 @@ interface TaskResult {
 }
 
 /**
- * 读取图片文件
- */
-async function readImageFile(imagePath: string, context?: ToolContext): Promise<{ data: Buffer; mimeType: string } | null> {
-    const { uri, isOutsideWorkspace } = resolveFileToolPathWithInfo(imagePath, context?.activeWorkspaceUri);
-    if (!uri) {
-        return null;
-    }
-
-    // 工作区外读取：按 read 策略审批（deny 拒绝 / ask 需确认 / allow 放行）
-    if (isOutsideWorkspace) {
-        const readAccessError = ensureOutsideWorkspaceAccessApproved('read_file', { path: imagePath }, context);
-        if (readAccessError) {
-            return null;
-        }
-    }
-
-    try {
-        const stat = await vscode.workspace.fs.stat(uri);
-        if (stat.size > MEDIA_MAX_INPUT_BYTES) {
-            console.warn(`Image file exceeds ${MEDIA_MAX_INPUT_BYTES} bytes: ${imagePath}`);
-            return null;
-        }
-
-        const content = await vscode.workspace.fs.readFile(uri);
-        const ext = path.extname(imagePath).toLowerCase();
-        let mimeType = 'image/png';
-        if (ext === '.jpg' || ext === '.jpeg') {
-            mimeType = 'image/jpeg';
-        } else if (ext === '.webp') {
-            mimeType = 'image/webp';
-        } else if (ext === '.gif') {
-            mimeType = 'image/gif';
-        }
-
-        return {
-            data: Buffer.from(content),
-            mimeType
-        };
-    } catch (error) {
-        return null;
-    }
-}
-
-/**
  * 执行单个缩放任务
  */
 async function executeResizeTask(
@@ -193,7 +153,7 @@ async function executeResizeTask(
         }
 
         // 读取原图
-        const imageFile = await readImageFile(image_path, context);
+        const imageFile = await readImageFile(image_path, context, 'resize_image');
         if (!imageFile) {
             return { index, success: false, error: `Task ${index + 1}: Cannot read image: ${image_path}` };
         }
@@ -244,7 +204,7 @@ async function executeResizeTask(
 
         // 工作区外写入：按 write 策略审批（与 write_file 保持一致）
         if (outputOutside) {
-            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context);
+            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context, 'resize_image');
             if (writeAccessError) {
                 return { index, success: false, error: `Task ${index + 1}: ${writeAccessError}` };
             }
@@ -315,33 +275,18 @@ export function createResizeImageTool(maxBatchTasks: number = 10): Tool {
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
 
-    let description = `Resize image tool. Resizes images to specified target dimensions.
+    // 语言感知说明：根据当前实际界面语言（zh-CN/en/ja）生成模型可见说明。
+    // 顶层说明（Limits、16384x16384 上限、多根尾巴）与参数说明统一由
+    // localization/dynamicDescriptions 的语言感知生成器负责。
+    const lang = resolveLocalizationLanguage(getActualLanguage());
+    const descriptions = buildResizeImageDescriptions({
+        lang,
+        maxBatchTasks,
+        isMultiRoot,
+        workspaceNames: workspaces.map(w => w.name)
+    });
 
-**Features**:
-- Resize image to specified width and height
-- Uses stretch fill mode (does not preserve aspect ratio)
-- Suitable for scenarios requiring exact dimensions
-
-**Parameters**:
-- width: Target width (pixels, required)
-- height: Target height (pixels, required)
-- image_path: Source image path (required)
-- output_path: Output file path (required)
-
-**Examples**:
-- Resize to 800x600: width=800, height=600
-- Resize to square 512x512: width=512, height=512
-- Resize to 1920x1080: width=1920, height=1080
-
-**Supported Formats**: PNG, JPEG, WebP (auto-selected based on output path extension)
-
-**Limits**:
-- Maximum ${maxBatchTasks} resize tasks per call
-- Target dimensions cannot exceed 16384x16384`;
-
-    if (isMultiRoot) {
-        description += `\n\n**Multi-root Workspace**: Use "workspace_name/path" format for paths. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
-    }
+    const description = descriptions.description;
 
     return {
         declaration: {
@@ -355,25 +300,25 @@ export function createResizeImageTool(maxBatchTasks: number = 10): Tool {
                     // 批量模式参数
                     images: {
                         type: 'array',
-                        description: 'Batch mode: Resize task array. Each task can independently configure input, output, and target dimensions. MUST be an array even for single task.',
+                        description: descriptions.images,
                         items: {
                             type: 'object',
                             properties: {
                                 image_path: {
                                     type: 'string',
-                                    description: 'Source image path (required)'
+                                    description: descriptions.batchImagePath
                                 },
                                 output_path: {
                                     type: 'string',
-                                    description: 'Output file path (required)'
+                                    description: descriptions.batchOutputPath
                                 },
                                 width: {
                                     type: 'integer',
-                                    description: 'Target width (pixels, required)'
+                                    description: descriptions.batchWidth
                                 },
                                 height: {
                                     type: 'integer',
-                                    description: 'Target height (pixels, required)'
+                                    description: descriptions.batchHeight
                                 }
                             },
                             required: ['image_path', 'output_path', 'width', 'height']
@@ -382,23 +327,19 @@ export function createResizeImageTool(maxBatchTasks: number = 10): Tool {
                     // 单张模式参数（向后兼容）
                     image_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Source image path (required). Use "workspace_name/path" format.'
-                            : 'Single mode: Source image path (required). Relative to workspace.'
+                        description: descriptions.singleImagePath
                     },
                     output_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Output file path (required). Use "workspace_name/path" format.'
-                            : 'Single mode: Output file path (required).'
+                        description: descriptions.singleOutputPath
                     },
                     width: {
                         type: 'integer',
-                        description: 'Single mode: Target width (pixels, required)'
+                        description: descriptions.singleWidth
                     },
                     height: {
                         type: 'integer',
-                        description: 'Single mode: Target height (pixels, required)'
+                        description: descriptions.singleHeight
                     }
                 }
             }

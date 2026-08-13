@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolDeclaration, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { normalizeLineEndingsToLF, resolveUriWithInfo } from '../utils';
 import { DESIGN_PATH_SCOPE_LABEL, buildPathRejectedError } from '../shared/pathPolicy';
 import { ensureParentDir, isDesignModePathAllowedWithMultiRoot } from './pathUtils';
@@ -49,7 +50,7 @@ export function createUpdateDesignTool(): Tool {
   return {
     declaration: createUpdateDesignToolDeclaration(),
     handler: async (rawArgs: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> => {
-      const args = rawArgs as unknown as UpdateDesignArgs;
+      const args = parseArgs<UpdateDesignArgs>(rawArgs);
       const targetPath = typeof args.path === 'string' ? args.path.trim() : '';
       const design = typeof args.design === 'string' ? args.design : '';
       const changeSummary = typeof args.changeSummary === 'string' ? args.changeSummary.trim() : '';
@@ -74,7 +75,20 @@ export function createUpdateDesignTool(): Tool {
       try {
         await vscode.workspace.fs.readFile(uri);
       } catch (e: any) {
-        return { success: false, error: e?.message || `Design document does not exist: ${targetPath}` };
+        // 参照 create_progress：区分「文档不存在」与其它读取错误（发现 17）。
+        // 只有 ENOENT/FileNotFound 才按不存在处理（保留原始消息，与旧行为一致）；
+        // EACCES/IO 等异常给出明确错误。
+        const readMessage = String(e?.message || '');
+        const readCode = String(e?.code || '');
+        const isNotFound = readCode === 'ENOENT' || readCode === 'FileNotFound'
+          || /enoent|not exist|file not found|FileNotFound/i.test(readMessage);
+        if (isNotFound) {
+          return { success: false, error: e?.message || `Design document does not exist: ${targetPath}` };
+        }
+        return {
+          success: false,
+          error: `Failed to read existing design document: ${readMessage || targetPath}`
+        };
       }
 
       try {

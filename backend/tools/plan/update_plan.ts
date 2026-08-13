@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import type { Tool, ToolDeclaration, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { normalizeLineEndingsToLF, resolveUriWithInfo } from '../utils';
 import { PLAN_PATH_SCOPE_LABEL, buildPathRejectedError } from '../shared/pathPolicy';
 import { buildPlanDocument, extractPlanBodyContent } from './documentLayout';
@@ -43,7 +44,7 @@ export function createUpdatePlanToolDeclaration(): ToolDeclaration {
     name: 'update_plan',
     strict: true,
     description:
-      'Update an existing plan document (markdown) under .graycode/plans/**.md. Use revision mode to revise the plan itself, or progress_sync mode to sync the latest TODO snapshot during implementation. In progress_sync mode, only send path, todos, updateMode, and optional changeSummary. If sourceArtifact is accidentally included, it will be ignored with a warning. Do NOT forward continuation/source-artifact carry-over fields such as sourceArtifactType, sourcePath, sourceContent, planPath, planContent, or continuationPrompt.',
+      'Update an existing plan document (markdown) under .graycode/plans/**.md. Use revision mode to revise the plan itself, or progress_sync mode to sync the latest TODO snapshot during implementation. In progress_sync mode, only send path, todos, updateMode, and optional changeSummary. If sourceArtifact is accidentally included, it will be ignored with a warning. Do NOT forward continuation/source-artifact carry-over fields such as sourceArtifactType, sourcePath, sourceContent, planPath, planContent, continuationPrompt, planExecutionPrompt, continuationApproved, or continuationIntent.',
     category: 'plan',
     parameters: {
       type: 'object',
@@ -105,7 +106,7 @@ export function createUpdatePlanTool(): Tool {
       if (unexpectedKeys.length > 0) {
         return { success: false, error: `Unexpected update_plan fields: ${unexpectedKeys.join(', ')}` };
       }
-      const args = rawArgs as unknown as UpdatePlanArgs;
+      const args = parseArgs<UpdatePlanArgs>(rawArgs);
       const targetPath = typeof args.path === 'string' ? args.path.trim() : '';
       const plan = typeof args.plan === 'string' ? args.plan : '';
       const changeSummary = typeof args.changeSummary === 'string' ? args.changeSummary.trim() : '';

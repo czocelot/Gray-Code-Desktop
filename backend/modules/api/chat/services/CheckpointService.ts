@@ -187,6 +187,39 @@ export class CheckpointService {
     }
 
     /**
+     * 判定单个工具调用是否命中已配置的存档工具（流式早启动批次检查点合并用）。
+     *
+     * 语义与工具执行核心（execution.ts toolNameForCheckpoint）的单工具判定一致：
+     * - search_in_files 纯 search 模式只读，不创建存档；
+     * - settingsManager 未注入时保守返回 true（由 CheckpointManager 内部配置决定是否真正创建）。
+     *
+     * 用途：ToolIterationLoopService 流式路径在「一次模型回复 = 一个工具批次」维度统一创建
+     * 检查点，需在创建前判断批内是否存在已配置存档工具（避免纯只读批次误建 tool_batch 存档）。
+     */
+    isToolConfiguredForCheckpoint(toolName: string, args?: unknown, phase?: 'before' | 'after'): boolean {
+        if (toolName === 'search_in_files' && (args as { mode?: string })?.mode !== 'replace') {
+            return false;
+        }
+        if (!this.settingsManager) {
+            return true;
+        }
+        const config = this.settingsManager.getCheckpointConfig();
+        // 整体关闭时直接返回 false：避免每个早启动工具都触发一次 ensure 尝试
+        // （每次尝试含一次全量 transcript 读取后由 CheckpointManager 返回 null）
+        if (!config.enabled) {
+            return false;
+        }
+        // CPF-07：按 phase 精确判定——批次 before 只认 beforeTools、after 只认 afterTools；
+        // 不传 phase 时保持旧语义（before ∪ after 并集），兼容既有调用。
+        const toolList = phase === 'before'
+            ? (config.beforeTools ?? [])
+            : phase === 'after'
+                ? (config.afterTools ?? [])
+                : [...(config.beforeTools ?? []), ...(config.afterTools ?? [])];
+        return toolList.includes(toolName);
+    }
+
+    /**
      * 为工具执行创建检查点
      *
      * 这里不额外做开关判断，直接委托给 CheckpointManager，由其根据配置决定是否实际创建。
@@ -202,7 +235,16 @@ export class CheckpointService {
         toolName: string,
         phase: 'before' | 'after',
         messageNodeId?: string,
-        options?: { progress?: (progress: CheckpointOperationProgress) => void }
+        options?: {
+            progress?: (progress: CheckpointOperationProgress) => void;
+            /** 批内工具名（tool_batch 精确判定用，透传给 CheckpointManager） */
+            batchToolNames?: string[];
+            /**
+             * CP-PARTIAL-1：受影响文件绝对路径（工具执行存档按参数限定的文件构建部分快照，
+             * 不再全量扫描工作区；透传给 CheckpointManager）。缺省 = 全量扫描（既有行为）。
+             */
+            affectedPaths?: string[];
+        }
     ): Promise<CheckpointRecord | null> {
         if (!this.checkpointManager) {
             return null;
@@ -217,6 +259,10 @@ export class CheckpointService {
             phase,
             {
                 ...(options && options.progress ? { progress: options.progress } : {}),
+                // 空数组也透传（CheckpointManager 对空 batchToolNames 显式返回 false＝无工具不建存档），
+                // 与「未传」回退旧语义（列表非空即建）明确区分，避免契约歧义。
+                ...(options && options.batchToolNames ? { batchToolNames: options.batchToolNames } : {}),
+                ...(options && options.affectedPaths ? { affectedPaths: options.affectedPaths } : {}),
                 ...(resolvedNodeId ? { messageNodeId: resolvedNodeId } : {})
             }
         ));
@@ -230,12 +276,63 @@ export class CheckpointService {
     async deleteCheckpointsFromIndex(
         conversationId: string,
         startIndex: number,
-        excludeCheckpointId?: string
+        excludeCheckpointId?: string,
+        lineageNodeIdsOverride?: ReadonlySet<string>
     ): Promise<void> {
         if (!this.checkpointManager) {
             return;
         }
-        await this.checkpointManager.deleteCheckpointsFromIndex(conversationId, startIndex, excludeCheckpointId);
+        if (lineageNodeIdsOverride === undefined) {
+            // 保持既有调用形状：普通分支切换仍是三参调用，只有 delete-to-message
+            // 在历史已经原子截断后才需要显式传入锁内捕获的 lineage。
+            await this.checkpointManager.deleteCheckpointsFromIndex(
+                conversationId,
+                startIndex,
+                excludeCheckpointId
+            );
+            return;
+        }
+        await this.checkpointManager.deleteCheckpointsFromIndex(
+            conversationId,
+            startIndex,
+            excludeCheckpointId,
+            lineageNodeIdsOverride
+        );
+    }
+
+    /**
+     * 在同一把检查点操作锁内执行对话截断，并提供一个可重入的检查点删除函数。
+     *
+     * 这让“读取旧索引 → 截断记录 → 按旧索引删除检查点”成为对其它检查点创建/删除互斥的
+     * 整体，避免截断后有新的 before 检查点插入同一索引，随后被旧请求误删。
+     */
+    async runWithCheckpointDeletionLock<T>(
+        conversationId: string,
+        task: (deleteFromIndex: (
+            startIndex: number,
+            excludeCheckpointId?: string,
+            lineageNodeIdsOverride?: ReadonlySet<string>
+        ) => Promise<void>) => Promise<T>
+    ): Promise<T> {
+        if (!this.checkpointManager) {
+            return await task(async () => undefined);
+        }
+        return await this.checkpointManager.runWithCheckpointDeletionLock(
+            conversationId,
+            async lockOwnerId => await task(async (
+                startIndex,
+                excludeCheckpointId,
+                lineageNodeIdsOverride
+            ) => {
+                await this.checkpointManager!.deleteCheckpointsFromIndex(
+                    conversationId,
+                    startIndex,
+                    excludeCheckpointId,
+                    lineageNodeIdsOverride,
+                    lockOwnerId
+                );
+            })
+        );
     }
 }
 

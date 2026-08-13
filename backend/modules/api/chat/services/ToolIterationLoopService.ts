@@ -35,7 +35,8 @@ import type {
     PendingToolCall
 } from '../types';
 
-import { StreamResponseProcessor, isAsyncGenerator, type ProcessedChunkData } from '../handlers/StreamResponseProcessor';
+import { isAsyncGenerator } from '../handlers/StreamResponseProcessor';
+import { isDiffReviewToolCall } from './diffReviewTools';
 import type { FunctionCallInfo, ToolExecutionResult } from '../utils';
 import type { ToolCallParserService } from './ToolCallParserService';
 import type { MessageBuilderService } from './MessageBuilderService';
@@ -47,11 +48,32 @@ import type { SummarizeService } from './SummarizeService';
 import { resolveAndPersistPostToolStopState } from './postToolStopState';
 import { createChatToolStatusUpdate, EarlyStreamingToolProgressQueue } from './streamingToolProgress';
 import { RepeatedCallGuard } from './repeatedCallGuard';
-import { isDiffReviewToolCall } from './diffReviewTools';
 import { deserializePromptContextCache, serializePromptContextCache } from '../../../prompt/promptContextCache';
 import type { DynamicContextDiffBase, DynamicRuntimeContext } from '../../../prompt/PromptManager';
 import { MAIN_SESSION_RUN_ID } from '../../../../core/services/agentMailbox';
 import { DEFAULT_MAX_AUTO_SUMMARIZE_ATTEMPTS_PER_TURN } from '../../../settings/types/summarizeTypes';
+import { workspaceUriToFsPath } from '../../../checkpoint/affectedPaths';
+import {
+    collectAffectedPaths,
+    createBeforeModelCheckpoint as createBeforeModelCheckpointForTurn,
+    ensureBatchBeforeForConfirmation,
+    finalizeStreamBatchCheckpoints,
+    type CheckpointCoordinatorContext,
+    type StreamToolBatchCheckpointState,
+    type TurnBatchCheckpointState
+} from './toolIterationLoop/checkpointCoordinator';
+import {
+    orderFunctionResponsePartsByCallSequence,
+    orderToolResultsByCallSequence,
+    settleCancelledNonStreamToolCalls,
+    settleCancelledToolCalls
+} from './toolIterationLoop/settlement';
+import { planToolExecutionOrder } from './toolIterationLoop/confirmationGate';
+import {
+    createStreamResponseProcessor,
+    makeEarlyToolStatusDrainer,
+    startEarlyStreamingTools
+} from './toolIterationLoop/streamConsumer';
 
 const CONVERSATION_PINNED_FILES_KEY = 'inputPinnedFiles';
 const CONVERSATION_SKILLS_KEY = 'inputSkills';
@@ -123,7 +145,6 @@ function shouldStartToolDuringModelStream(
     return !toolExecutionService.toolNeedsConfirmation(call.name, call.args, promptModeSnapshot)
         && !isDiffReviewToolCall(call.name, call.args);
 }
-
 /**
  * 工具迭代循环配置
  */
@@ -285,6 +306,17 @@ export class ToolIterationLoopService {
         this.summarizeService = summarizeService;
     }
 
+    /**
+     * 检查点编排依赖（供 toolIterationLoop/checkpointCoordinator 使用）。
+     */
+    private get checkpointCoordinator(): CheckpointCoordinatorContext {
+        return {
+            checkpointService: this.checkpointService,
+            conversationManager: this.conversationManager,
+            log: this.log
+        };
+    }
+
     private async loadDynamicRuntimeContext(conversationId: string): Promise<{
         todoList?: unknown;
         pinnedFiles?: unknown;
@@ -404,73 +436,7 @@ export class ToolIterationLoopService {
         return undefined;
     }
 
-    private orderToolResultsByCallSequence(
-        calls: FunctionCallInfo[],
-        groups: Array<ToolExecutionResult[] | undefined>
-    ): ToolExecutionResult[] {
-        const byId = new Map<string, ToolExecutionResult>();
-        const extras: ToolExecutionResult[] = [];
 
-        for (const group of groups) {
-            if (!group) continue;
-            for (const result of group) {
-                if (!result?.id) {
-                    extras.push(result);
-                    continue;
-                }
-                if (!byId.has(result.id)) {
-                    byId.set(result.id, result);
-                }
-            }
-        }
-
-        const ordered: ToolExecutionResult[] = [];
-        for (const call of calls) {
-            const match = byId.get(call.id);
-            if (match) {
-                ordered.push(match);
-                byId.delete(call.id);
-            }
-        }
-
-        ordered.push(...byId.values(), ...extras);
-        return ordered;
-    }
-
-    private orderFunctionResponsePartsByCallSequence(
-        calls: FunctionCallInfo[],
-        groups: Array<ContentPart[] | undefined>
-    ): ContentPart[] {
-        const byId = new Map<string, ContentPart>();
-        const extras: ContentPart[] = [];
-
-        for (const group of groups) {
-            if (!group) continue;
-            for (const part of group) {
-                const id = part.functionResponse?.id;
-                if (!id) {
-                    extras.push(part);
-                    continue;
-                }
-                if (!byId.has(id)) {
-                    byId.set(id, part);
-                }
-            }
-        }
-
-        const ordered: ContentPart[] = [];
-        for (const call of calls) {
-            const match = byId.get(call.id);
-            if (match) {
-                ordered.push(match);
-                byId.delete(call.id);
-            }
-        }
-
-        ordered.push(...byId.values(), ...extras);
-        return ordered;
-    }
-    
     /**
      * 找到当前回合的起始用户消息索引（最后一个 isUserInput=true 的 user 消息）
      */
@@ -532,6 +498,47 @@ export class ToolIterationLoopService {
     }
 
     /**
+     * 各会话「当前真实用户回合」的工具批次 before 状态（conversationId → 回合状态）。
+     *
+     * 与 turnAutoSummarizeAttempts 同模式：回合内多次 runToolLoop / runNonStreamLoop
+     * （新回合生成 → 工具确认后 isNewTurn=false 续跑）共享同一份 before 状态——批次前存档
+     * 只在回合首个创建迭代建一次，中间迭代只建各自的批次后存档（迭代 N 的 after 即迭代 N+1
+     * 的执行前状态）；新回合（isNewTurn）或回合锚点变化自动重置，会话删除后条目不残留
+     * （M5 有界淘汰）。
+     */
+    private readonly turnBatchCheckpoints = new Map<string, TurnBatchCheckpointState>();
+
+    /**
+     * 解析本回合的工具批次 before 状态（回合级共享，语义照抄 resolveTurnAutoSummarizeAttempts）。
+     *
+     * - 新真实用户回合（isNewTurn=true）或回合锚点变化（起始用户消息 id 漂移）：重置为新状态；
+     * - 回合续跑（retry / 工具确认后的继续，isNewTurn=false 且锚点未变）：复用既有状态——
+     *   beforeCreated=true 时续跑不再创建批次前存档。
+     */
+    private resolveTurnBatchCheckpoint(
+        conversationId: string,
+        turnStartMessageId: string | null,
+        isNewTurn: boolean,
+    ): TurnBatchCheckpointState {
+        const anchor = typeof turnStartMessageId === 'string' && turnStartMessageId.trim()
+            ? turnStartMessageId.trim()
+            : '';
+        const current = this.turnBatchCheckpoints.get(conversationId);
+        if (isNewTurn || anchor !== current?.turnStartMessageId) {
+            const fresh: TurnBatchCheckpointState = {
+                turnStartMessageId: anchor,
+                beforeCheckpoint: null,
+                beforeCreated: false
+            };
+            this.turnBatchCheckpoints.set(conversationId, fresh);
+            // M5：保持会话级 Map 有界（会话删除后条目不残留无界增长）
+            this.evictOldestIfOversized(this.turnBatchCheckpoints);
+            return fresh;
+        }
+        return current!;
+    }
+
+    /**
      * 清除指定会话的裁剪状态
      * 
      * 在以下情况下应调用：
@@ -588,115 +595,7 @@ export class ToolIterationLoopService {
         return { signal: controller.signal, dispose };
     }
 
-    /**
-     * 取消时结算模型消息里已经落地的工具调用。
-     *
-     * 流式取消会把累加器中的部分内容直接写进历史，其中可能已经包含**完整**的 functionCall。
-     * 不补对应的 functionResponse，历史里就留下悬空的 tool_use：Anthropic / OpenAI 在下一次
-     * 请求时会直接以 400 拒绝，而用户看到的是一句和「我刚才按了停止」毫无关系的报错。
-     *
-     * 流式提前执行已经跑完的工具用真实结果结算——它们的副作用（写文件、跑命令）已经发生，
-     * 丢掉结果等于对模型隐瞒；其余标记为已取消。
-     */
-    private async settleCancelledToolCalls(
-        conversationId: string,
-        cancelledContent: Content,
-        settledResults: Map<string, ToolExecutionFullResult>
-    ): Promise<void> {
-        const cancelledCalls = cancelledContent.parts
-            .map(part => part.functionCall)
-            .filter((call): call is NonNullable<ContentPart['functionCall']> & { id: string } => !!call?.id);
 
-        if (cancelledCalls.length === 0) {
-            return;
-        }
-
-        const responseParts: ContentPart[] = cancelledCalls.map(call => {
-            const settledPart = settledResults.get(call.id)
-                ?.responseParts
-                .find(part => part.functionResponse?.id === call.id);
-
-            return settledPart ?? {
-                functionResponse: {
-                    id: call.id,
-                    name: call.name || 'unknown',
-                    response: {
-                        success: false,
-                        error: t('modules.api.chat.errors.toolCallCancelled'),
-                        cancelled: true
-                    }
-                }
-            };
-        });
-
-        // 提前执行工具产生的多模态附件（xml/json prompt 模式）不能丢：
-        // 与响应 part 一并写入，否则 generate_image / MCP 图片结果静默丢失。
-        const multimodalAttachments = Array.from(settledResults.values())
-            .flatMap(result => result.multimodalAttachments ?? []);
-        const allParts = multimodalAttachments.length > 0
-            ? [...multimodalAttachments, ...responseParts]
-            : responseParts;
-
-        // 用 settleFunctionResponses 代替 addContent：cancelStream 的
-        // rejectAllPendingToolCalls 可能已写入"用户拒绝"占位，addContent 的去重
-        // 会把真实结果丢弃（真实副作用结果永久丢失）；settleFunctionResponses
-        // 保证真实结果永远覆盖占位。
-        await this.conversationManager.settleFunctionResponses(conversationId, allParts);
-    }
-
-    /**
-     * 非流式 abort 结算（与流式 settleCancelledToolCalls 同构）。
-     *
-     * runNonStreamLoop 主循环顶部发现 abort 时，最近一次 addContent 写入历史的
-     * assistant 消息可能已包含**完整**的 functionCall，但工具执行被 abort 中断
-     * （并行组收尾窗口超时返回空结果、executeFunctionCallsWithProgressCore 主循环
-     * 顶部 break 跳过未启动调用）导致部分调用没有配对 functionResponse。不补占位
-     * 会在历史留下悬空 tool_use：重试/新消息时 rejectAllPendingToolCalls 误标
-     * "用户拒绝"，或 formatter 原样发送孤儿调用触发 400。
-     *
-     * 与流式路径一致：已执行完的调用（settledResult 中有真实响应）保持原样，
-     * 其余补 cancelled 占位，经 settleFunctionResponses 幂等落盘（覆盖占位、
-     * 插入到所属 functionCall 消息之后，避免 addContent 去重丢弃或非法消息交替顺序）。
-     */
-    private async settleCancelledNonStreamToolCalls(
-        conversationId: string,
-        functionCalls: FunctionCallInfo[],
-        settledResult: ToolExecutionFullResult | undefined
-    ): Promise<void> {
-        if (functionCalls.length === 0) {
-            return;
-        }
-
-        const settledIds = new Set(
-            (settledResult?.responseParts ?? [])
-                .map(part => part.functionResponse?.id)
-                .filter((id): id is string => !!id)
-        );
-        const cancelledCalls = functionCalls.filter(call => !settledIds.has(call.id));
-        if (cancelledCalls.length === 0) {
-            return;
-        }
-
-        this.log.info('nonstream.abort_settle_cancelled', {
-            conversationId,
-            totalCalls: functionCalls.length,
-            cancelledCalls: cancelledCalls.length
-        });
-
-        const responseParts: ContentPart[] = cancelledCalls.map(call => ({
-            functionResponse: {
-                id: call.id,
-                name: call.name || 'unknown',
-                response: {
-                    success: false,
-                    error: t('modules.api.chat.errors.toolCallCancelled'),
-                    cancelled: true
-                }
-            }
-        }));
-
-        await this.conversationManager.settleFunctionResponses(conversationId, responseParts);
-    }
 
     /**
      * 运行工具迭代循环（流式）
@@ -763,6 +662,10 @@ export class ToolIterationLoopService {
             historyRef[turnStartIndex]?.id,
             isNewTurn,
         );
+        // 回合级工具批次 before 状态：同一真实用户回合内只创建一次批次前存档（挂在回合首个
+        // 创建迭代的模型消息位置），中间迭代/确认续跑不再创建 before，只保留各自迭代的 after。
+        // 与 turnAutoSummarizeAttempts 同策略：新回合或锚点变化自动重置，不主动清理。
+        const turnBatch = this.resolveTurnBatchCheckpoint(conversationId, turnStartId, isNewTurn);
 
         if (turnStartIndex < 0 || !historyRef[turnStartIndex]?.turnDynamicContext) {
             // 新用户消息已经在 ChatFlowService 中携带快照；这里只对旧历史缺失缓存的兼容路径
@@ -853,7 +756,8 @@ export class ToolIterationLoopService {
 
             // 2. 创建模型消息前的检查点（如果配置了）
             if (createBeforeModelCheckpoint) {
-                const checkpointData = await this.createBeforeModelCheckpoint(
+                const checkpointData = await createBeforeModelCheckpointForTurn(
+                    this.checkpointCoordinator,
                     conversationId,
                     iteration
                 );
@@ -1043,23 +947,35 @@ export class ToolIterationLoopService {
             // 避免被 .catch 伪装成"工具业务失败"写入历史。
             let earlyToolSystemError: unknown = undefined;
             const earlyToolProgressQueue = new EarlyStreamingToolProgressQueue();
-            const drainSettledEarlyToolStatuses = (): ChatStreamToolStatusData[] => earlyToolProgressQueue
-                .drainSettled()
-                .flatMap(settlement => settlement.fullResult.toolResults.map(toolResult => ({
-                    conversationId,
-                    toolStatus: true as const,
-                    tool: createChatToolStatusUpdate(toolResult)
-                })));
+            // CPF-07：本迭代（一次模型回复）的工具批次检查点状态——早启动与主循环共享一组 before/after
+            const streamBatchCheckpoint: StreamToolBatchCheckpointState = {
+                beforeCheckpoint: null,
+                beforeCreated: false,
+                needsCheckpoint: false,
+                afterCheckpoint: null,
+                finalized: false,
+                batchToolNames: new Set(),
+                // CP-PARTIAL-1：工作区根 fsPath（早启动/主循环共用；确认分支复用 batch 状态）
+                workspaceRootFsPath: runtimeContext?.workspaceUri
+                    ? (workspaceUriToFsPath(runtimeContext.workspaceUri) ?? undefined)
+                    : undefined,
+                affectedPathsResolved: false
+            };
+            // 回合级 before 状态合并：before 由回合状态决定（本回合首个创建迭代建一次），
+            // 迭代内可临时修改（早启动/主循环/确认补建三处创建点），创建/重置后立即写回回合状态；
+            // messageIndex 合并后由本迭代的挂载索引计算覆盖（早启动 batchIndexPromise / 主循环
+            // batchMessageIndex），保证迭代 N 的 after 挂本迭代模型消息索引、before 挂回合
+            // 首个创建迭代索引。needsCheckpoint 不跨迭代传播：每次迭代由本迭代的批内工具
+            // 按 afterTools 命中自行收集（传播后新一轮迭代会跳过 after 命中检查，最终正确性
+            // 只能靠 CheckpointManager 求交兜底，多一次无效创建尝试且状态语义复杂化）。
+            streamBatchCheckpoint.beforeCreated = turnBatch.beforeCreated;
+            streamBatchCheckpoint.beforeCheckpoint = turnBatch.beforeCheckpoint;
+            streamBatchCheckpoint.messageIndex = turnBatch.messageIndex;
+            const drainSettledEarlyToolStatuses = makeEarlyToolStatusDrainer(earlyToolProgressQueue, conversationId);
 
             if (isAsyncGenerator(response)) {
                 // 流式响应处理
-                const processor = new StreamResponseProcessor({
-                    requestStartTime,
-                    providerType: config.type as 'gemini' | 'openai' | 'anthropic' | 'openai-responses' | 'custom',
-                    toolMode: config.toolMode || 'function_call',
-                    abortSignal,
-                    conversationId
-                });
+                const processor = createStreamResponseProcessor(requestStartTime, config, abortSignal, conversationId);
                 // 处理流并 yield 每个 chunk，同时检测新完成的 functionCall 提前启动执行
                 for await (const chunkData of processor.processStream(response)) {
                     yield chunkData;
@@ -1069,93 +985,26 @@ export class ToolIterationLoopService {
                     // 需要确认的工具跳过（仍走现有的暂停等待路径）。
                     if (!abortSignal?.aborted) {
                         const newCalls = processor.getAccumulator().getNewCompletedFunctionCalls();
-                        for (const fc of newCalls) {
-                            // 只对不需要确认、且不会创建 pending diff 审阅会话的工具提前执行。
-                            if (shouldStartToolDuringModelStream(fc, this.toolExecutionService, promptModeSnapshot)) {
-                                this.log.info('stream.early_tool_start', { conversationId, iteration, toolName: fc.name, toolId: fc.id });
-                                yield {
-                                    conversationId,
-                                    toolStatus: true as const,
-                                    tool: {
-                                        id: fc.id,
-                                        name: fc.name,
-                                        status: 'executing' as const,
-                                        args: fc.args
-                                    }
-                                } satisfies ChatStreamToolStatusData;
-
-                                // 检查点挂到“即将写入的模型消息”索引上（与 createModelMessageCheckpoint
-                                // 的 before 语义一致）。以前这里传 undefined，导致流式早启动的工具
-                                // （含 execute_command 等会改变文件系统的工具）完全没有检查点保护。
-                                const earlyCheckpointIndex = (await this.conversationManager.getHistoryRef(conversationId)).length;
-                                const rawPromise = this.toolExecutionService.executeFunctionCallsWithResults(
-                                    [repeatedCallGuard.guardCall({ id: fc.id, name: fc.name, args: fc.args })],
-                                    conversationId,
-                                    earlyCheckpointIndex,
-                                    config,
-                                    abortSignal,
-                                    promptModeSnapshot,
-                                    undefined,
-                                    undefined,
-                                    undefined,
-                                    // E-1：早启动生成器一律不参与主会话信箱 drain（不传 mailbox 身份）。
-                                    // 原因：早启动在其持有 epoch 期间完成 drain 后，若流中途 cancel 且
-                                    // 携带 agentInbox 的结果被整体丢弃（partialContent.parts.length===0 不落盘，
-                                    // 或调用 id 不在 partialContent 中不结算），消息已从 inbox 移除、未持久化 =
-                                    // 丢失。改为统一由主循环 drain；无主循环时在 autoPrefix 为空分支显式 drain 一次。
-                                    undefined,
-                                    undefined,
-                                    // 主会话路径无嵌套深度（subagent 工具自行注入子代理深度）
-                                    undefined,
-                                    // 当前对话绑定的工作区 URI（用于工具执行的工作区限定/记忆路由）
-                                    runtimeContext?.workspaceUri,
-                                    // General Worker 模型继承：把主会话当前模型透传给工具上下文
-                                    modelOverride
-                                ).catch(err => {
-                                    // 执行异常分类：可预期的执行失败（渠道层 ChannelError）
-                                    // 保持既有包装写入历史，toolResults.result 仍是工具业务
-                                    // 返回值格式，前端能正确渲染；系统异常（编程错误、检查点/
-                                    // 信箱等基础设施错误）不伪装成工具失败——记录到
-                                    // earlyToolSystemError，由下方流循环检查点重新抛出，
-                                    // 走上层统一错误通道（与主循环/非流式路径传播语义对齐）。
-                                    if (!isExpectedToolExecutionError(err)) {
-                                        earlyToolSystemError = err;
-                                        this.log.error('stream.early_tool_system_error', {
-                                            conversationId,
-                                            toolName: fc.name,
-                                            toolId: fc.id,
-                                            error: (err as Error)?.message ?? String(err),
-                                            stack: (err as Error)?.stack
-                                        });
-                                        // 返回空占位结果：保证进度队列/结果去重机制正常落定
-                                        // （无未处理拒绝），streamingToolResults.has(fc.id) 成立
-                                        // 使该调用不会在主循环被重复执行；空 responseParts 确保
-                                        // 取消结算时回退为标准"已取消"占位，系统异常本身只经
-                                        // 日志与上层错误通道暴露，不写入历史。
-                                        return {
-                                            responseParts: [],
-                                            toolResults: [],
-                                            checkpoints: []
-                                        } as ToolExecutionFullResult;
-                                    }
-                                    const errorResponse: Record<string, unknown> = {
-                                        success: false,
-                                        error: (err as Error).message
-                                    };
-                                    return {
-                                        responseParts: [{ functionResponse: { id: fc.id, name: fc.name, response: errorResponse } }],
-                                        toolResults: [{ id: fc.id, name: fc.name, args: fc.args, result: errorResponse }],
-                                        checkpoints: []
-                                    } as ToolExecutionFullResult;
-                                }).then(fullResult => {
-                                    streamingToolResults.set(fc.id, fullResult);
-                                    return fullResult;
-                                });
-
-                                const promise = earlyToolProgressQueue.track(fc, rawPromise);
-                                streamingToolPromises.set(fc.id, promise);
-                            }
-                        }
+                        yield* startEarlyStreamingTools({
+                            conversationId,
+                            iteration,
+                            newCalls,
+                            config,
+                            abortSignal,
+                            promptModeSnapshot,
+                            modelOverride,
+                            runtimeContext,
+                            repeatedCallGuard,
+                            streamingToolPromises,
+                            streamingToolResults,
+                            earlyToolProgressQueue,
+                            streamBatchCheckpoint,
+                            turnBatch,
+                            toolExecutionService: this.toolExecutionService,
+                            checkpointService: this.checkpointService,
+                            conversationManager: this.conversationManager,
+                            log: this.log
+                        });
                     }
 
                     for (const statusChunk of drainSettledEarlyToolStatuses()) {
@@ -1217,7 +1066,7 @@ export class ToolIterationLoopService {
                         if (persistedPartialContent) {
                             partialContent = persistedPartialContent;
                         }
-                        await this.settleCancelledToolCalls(conversationId, partialContent, streamingToolResults);
+                        await settleCancelledToolCalls(this.conversationManager, conversationId, partialContent, streamingToolResults);
 
                         // 与 stream_early_abort 路径（878-902 行）对齐：结算 stop state，
                         // 避免 pendingApprovalGate 等状态残留，否则后续 hidden continuation
@@ -1226,7 +1075,7 @@ export class ToolIterationLoopService {
                             .map(part => part.functionCall)
                             .filter((call): call is NonNullable<ContentPart['functionCall']> & { id: string } => !!call?.id);
                         const settledEarlyResults = Array.from(streamingToolResults.values());
-                        const settledToolResults = this.orderToolResultsByCallSequence(
+                        const settledToolResults = orderToolResultsByCallSequence(
                             cancelledCalls,
                             [settledEarlyResults.flatMap(result => result.toolResults)]
                         );
@@ -1260,13 +1109,7 @@ export class ToolIterationLoopService {
                 finalContent = processor.getContent();
             } else {
                 // 非流式响应处理
-                const processor = new StreamResponseProcessor({
-                    requestStartTime,
-                    providerType: config.type as 'gemini' | 'openai' | 'anthropic' | 'openai-responses' | 'custom',
-                    toolMode: config.toolMode || 'function_call',
-                    abortSignal,
-                    conversationId
-                });
+                const processor = createStreamResponseProcessor(requestStartTime, config, abortSignal, conversationId);
 
                 const { content, chunkData } = processor.processNonStream(response as GenerateResponse);
                 finalContent = content;
@@ -1317,17 +1160,20 @@ export class ToolIterationLoopService {
             // 12. 有工具调用：按 AI 输出顺序依次处理。
             // 规则：执行到第一个“需要用户批准”的工具时暂停；后续工具必须等待前置工具完成。
 
-            // 找到第一个需要确认的工具（按顺序），并只自动执行它之前的前缀工具。
-            const autoPrefix: FunctionCallInfo[] = [];
-            let firstConfirmTool: FunctionCallInfo | null = null;
+            // CPF-07：批次检查点挂载索引——模型消息已落盘（addContent 在 1216），此刻历史末位即
+            // 模型消息位置；早启动（history.length，模型消息未落盘时=插入位置）与此值语义一致，
+            // 主循环/确认路径共用此值（工具结果 settle 后历史变长，不能再按 length 推算）。
+            const currentHistoryRef = await this.conversationManager.getHistoryRef(conversationId);
+            // 测试 harness 场景下历史可能为空（length - 1 = -1）；生产不可达（有工具调用必有模型消息），
+            // 纯防御钳制到 0，避免 -1 索引泄漏到检查点挂载。
+            const batchMessageIndex = Math.max(0, currentHistoryRef.length - 1);
 
-            for (const call of functionCalls) {
-                if (this.toolExecutionService.toolNeedsConfirmation(call.name, call.args, promptModeSnapshot)) {
-                    firstConfirmTool = call;
-                    break;
-                }
-                autoPrefix.push(call);
-            }
+            // 找到第一个需要确认的工具（按顺序），并只自动执行它之前的前缀工具。
+            const { autoPrefix, firstConfirmTool } = planToolExecutionOrder(
+                functionCalls,
+                this.toolExecutionService,
+                promptModeSnapshot
+            );
 
             let executionResult: ToolExecutionFullResult | undefined;
 
@@ -1384,11 +1230,11 @@ export class ToolIterationLoopService {
                 // 等待期间被取消：已执行完的提前执行工具用真实结果结算（副作用已发生，
                 // 结果不能丢），未完成的调用标记为取消，避免悬空 tool_use 触发 API 400。
                 if (abortSignal?.aborted) {
-                    await this.settleCancelledToolCalls(conversationId, finalContent, streamingToolResults);
+                    await settleCancelledToolCalls(this.conversationManager, conversationId, finalContent, streamingToolResults);
                     // 与串行 abort 路径（executionPath: 'stream_abort'）语义对齐：
                     // 结算 stop state，避免 pendingApprovalGate 等状态残留。
                     const settledEarlyResults = Array.from(streamingToolResults.values());
-                    const settledToolResults = this.orderToolResultsByCallSequence(
+                    const settledToolResults = orderToolResultsByCallSequence(
                         functionCalls,
                         [settledEarlyResults.flatMap(result => result.toolResults)]
                     );
@@ -1435,23 +1281,20 @@ export class ToolIterationLoopService {
             const autoPrefixIndexById = new Map<string, number>(autoPrefix.map((c, i) => [c.id, i]));
 
             const earlyFullResults = Array.from(streamingToolResults.values());
-            const earlyToolResults = this.orderToolResultsByCallSequence(
+            const earlyToolResults = orderToolResultsByCallSequence(
                 functionCalls,
                 [earlyFullResults.flatMap(result => result.toolResults)]
             );
             repeatedCallGuard.recordResults(earlyToolResults);
-            const earlyResponseParts = this.orderFunctionResponsePartsByCallSequence(
+            const earlyResponseParts = orderFunctionResponsePartsByCallSequence(
                 functionCalls,
                 [earlyFullResults.flatMap(result => result.responseParts)]
             );
             // 流式提前执行的工具产生的多模态附件（xml/json prompt 模式）。
             // 以前这些附件被完全忽略，提前执行的 generate_image / MCP 图片结果会静默丢失。
             const earlyMultimodalAttachments = earlyFullResults.flatMap(result => result.multimodalAttachments ?? []);
-            // 流式提前执行的工具创建的检查点（挂在 earlyCheckpointIndex 上，与
-            // createModelMessageCheckpoint 的 before 语义一致）。主循环路径透传
-            // executionResult.checkpoints，此分支无主循环执行，透传提前执行结果
-            // 汇总的真实检查点（此前恒下发 checkpoints:[]，前端无检查点可回档）。
-            const earlyCheckpoints = earlyFullResults.flatMap(result => result.checkpoints ?? []);
+            // CPF-07：早启动工具执行时 checkpointMode='skip'，不再各自携带检查点；
+            // 批次检查点（before/after）统一由 streamBatchCheckpoint 管理并在批次收尾处下发。
 
             // 如果所有工具都已在流式期间执行完，autoPrefix 为空，
             // 但 earlyResponseParts 中有结果需要写入历史。
@@ -1491,7 +1334,37 @@ export class ToolIterationLoopService {
                     }
                 );
 
-                if (firstConfirmTool && !earlyStopState.shouldStop) {
+                // CPF-07：全部早启动工具已完成（无主循环）——批次收尾。
+                // 存在确认工具且未早停：批次尚未完成（确认工具未执行），先补建 before（若批内自动工具
+                // 均未配置 before 而未创建），after 推迟到确认路径全部工具执行完成后创建；
+                // 存在确认工具但早停：确认工具未决（随后被拒绝），批次实际未完成——同样不创建 after；
+                // 无确认工具时正常创建 after（幂等；after 创建失败仅降级，不阻断工具结果落盘）。
+                if (firstConfirmTool) {
+                    if (!earlyStopState.shouldStop) {
+                        await ensureBatchBeforeForConfirmation(this.checkpointCoordinator, 
+                            conversationId,
+                            streamBatchCheckpoint,
+                            functionCalls,
+                            turnBatch,
+                            batchMessageIndex
+                        );
+                    }
+                    const finalBatchCheckpoints = await finalizeStreamBatchCheckpoints(this.checkpointCoordinator, 
+                        conversationId,
+                        streamBatchCheckpoint,
+                        false
+                    );
+                    if (earlyStopState.shouldStop) {
+                        // 早停：不下发确认事件，确认工具由 rejectAllPendingToolCalls 标记拒绝
+                        yield {
+                            conversationId,
+                            content: finalContent,
+                            toolIteration: true as const,
+                            toolResults: earlyToolResults,
+                            checkpoints: finalBatchCheckpoints
+                        };
+                        return;
+                    }
                     yield {
                         conversationId,
                         pendingToolCalls: [{
@@ -1502,18 +1375,23 @@ export class ToolIterationLoopService {
                         content: finalContent,
                         awaitingConfirmation: true as const,
                         toolResults: earlyToolResults,
-                        checkpoints: earlyCheckpoints
+                        checkpoints: finalBatchCheckpoints
                     } satisfies ChatStreamToolConfirmationData;
 
                     return;
                 }
+
+                const finalBatchCheckpoints = await finalizeStreamBatchCheckpoints(this.checkpointCoordinator, 
+                    conversationId,
+                    streamBatchCheckpoint
+                );
 
                 yield {
                     conversationId,
                     content: finalContent,
                     toolIteration: true as const,
                     toolResults: earlyToolResults,
-                    checkpoints: earlyCheckpoints,
+                    checkpoints: finalBatchCheckpoints,
                 };
 
                 if (earlyStopState.shouldStop) {
@@ -1540,8 +1418,76 @@ export class ToolIterationLoopService {
                     }))
                 } satisfies ChatStreamToolsExecutingData;
 
-                const currentHistory = await this.conversationManager.getHistoryRef(conversationId);
-                const messageIndex = currentHistory.length - 1;
+                // CPF-07：批次检查点挂载索引复用循环层统一计算值（模型消息位置，见 12 段注释）
+                const messageIndex = batchMessageIndex;
+                // 收集主循环工具名 + 判定 after 命中——独立于 before 创建：
+                // 即使批次 before 已在早启动阶段创建（beforeCreated=true），主循环剩余工具
+                // 仍须计入 batchToolNames/needsCheckpoint，否则「仅主循环工具配置 after」
+                // 的批次会丢失 after 存档。
+                const loopCheckpointService = this.checkpointService;
+                for (const call of guardedAutoPrefix) {
+                    streamBatchCheckpoint.batchToolNames.add(call.name);
+                    if (!streamBatchCheckpoint.needsCheckpoint && loopCheckpointService
+                        && loopCheckpointService.isToolConfiguredForCheckpoint(call.name, call.args, 'after')) {
+                        streamBatchCheckpoint.needsCheckpoint = true;
+                    }
+                }
+                // CP-PARTIAL-1：主循环工具累计受影响路径（早启动阶段未覆盖的工具在此补全）
+                collectAffectedPaths(
+                    streamBatchCheckpoint,
+                    guardedAutoPrefix,
+                    streamBatchCheckpoint.workspaceRootFsPath
+                );
+                // 批次挂载索引：主循环路径计算值（模型消息已落盘，length - 1 = 模型消息位置）。
+                // 早启动阶段已设置时（模型消息未落盘时的 history.length = 插入位置）两值相等，覆盖无副作用；
+                // 无条件覆盖同时避免回合级 before 合并带来的「迭代 1 索引」污染迭代 2+ 的 after 挂载
+                // （回合 before 挂回合首个创建迭代索引，迭代 after 挂各自模型消息索引）。
+                streamBatchCheckpoint.messageIndex = messageIndex;
+                // CPF-07：主循环执行前补齐批次 before——早启动阶段未触发（批内写工具全部在
+                // 主循环）时在此创建，挂模型消息索引（与 execution.ts 同步 before 语义一致：
+                // 存档完成后工具才开始执行）。早启动已创建则跳过。
+                // 判定按 beforeTools 精确化：仅配置了 after 的工具不触发批次 before。
+                // 创建失败降级为无存档执行（warn），不阻断主循环（与 after 失败降级一致）。
+                if (!streamBatchCheckpoint.beforeCreated && loopCheckpointService
+                    && guardedAutoPrefix.some(call =>
+                        loopCheckpointService.isToolConfiguredForCheckpoint(call.name, call.args, 'before')
+                    )) {
+                    streamBatchCheckpoint.beforeCreated = true;
+                    try {
+                        streamBatchCheckpoint.beforeCheckpoint = await loopCheckpointService.createToolExecutionCheckpoint(
+                            conversationId,
+                            messageIndex,
+                            'tool_batch',
+                            'before',
+                            undefined,
+                            {
+                                batchToolNames: Array.from(streamBatchCheckpoint.batchToolNames),
+                                ...(streamBatchCheckpoint.affectedPaths
+                                    ? { affectedPaths: streamBatchCheckpoint.affectedPaths }
+                                    : {})
+                            }
+                        );
+                        if (streamBatchCheckpoint.beforeCheckpoint) {
+                            // 回合级写回：before 在真实用户回合内只创建一次（后续迭代/确认续跑复用）
+                            turnBatch.beforeCheckpoint = streamBatchCheckpoint.beforeCheckpoint;
+                            turnBatch.beforeCreated = true;
+                            turnBatch.messageIndex = messageIndex;
+                        } else {
+                            // 配置未命中（批内已见工具均未配置 before）：重置防重入，
+                            // 允许确认路径补建（批内确认工具可能配置了 before）。
+                            streamBatchCheckpoint.beforeCreated = false;
+                            turnBatch.beforeCreated = false;
+                        }
+                    } catch (error) {
+                        this.log.warn('checkpoint.batch_before_failed', {
+                            conversationId,
+                            error: (error as Error)?.message ?? String(error)
+                        });
+                        // 回合状态同步：创建异常降级为无存档执行（beforeCreated 保持 true，
+                        // 与批次状态一致——后续迭代不再从回合值读到 false 而重复尝试创建）。
+                        turnBatch.beforeCreated = true;
+                    }
+                }
 
                 // 执行工具调用（按顺序），并实时发送每个工具的开始/结束状态；
                 // 达到连续失败阈值的重复调用会被护栏替换为短路错误调用
@@ -1563,7 +1509,9 @@ export class ToolIterationLoopService {
                     // 当前对话绑定的工作区 URI（用于工具执行的工作区限定/记忆路由）
                     runtimeContext?.workspaceUri,
                     // General Worker 模型继承：把主会话当前模型透传给工具上下文
-                    modelOverride
+                    modelOverride,
+                    // CPF-07：批次检查点统一由本服务创建，执行核心跳过内部检查点
+                    'skip'
                 );
 
                 while (true) {
@@ -1679,11 +1627,11 @@ export class ToolIterationLoopService {
                     // 且下次请求前 rejectAllPendingToolCalls 会把悬空调用标记为"用户拒绝"，
                     // 真实执行结果永久丢失，模型可能重复执行同一工具调用。
                     if (executionResult) {
-                        const combinedToolResults = this.orderToolResultsByCallSequence(
+                        const combinedToolResults = orderToolResultsByCallSequence(
                             functionCalls,
                             [earlyToolResults, executionResult.toolResults]
                         );
-                        const orderedFunctionResponseParts = this.orderFunctionResponsePartsByCallSequence(
+                        const orderedFunctionResponseParts = orderFunctionResponsePartsByCallSequence(
                             functionCalls,
                             [earlyResponseParts, executionResult.responseParts]
                         );
@@ -1732,7 +1680,7 @@ export class ToolIterationLoopService {
                                 attachmentsAssigned = true;
                             }
                         }
-                        await this.settleCancelledToolCalls(conversationId, finalContent, earlySettledResults);
+                        await settleCancelledToolCalls(this.conversationManager, conversationId, finalContent, earlySettledResults);
                     }
 
                     yield {
@@ -1751,11 +1699,11 @@ export class ToolIterationLoopService {
 
                 repeatedCallGuard.recordResults(finalExecutionResult.toolResults);
 
-                const combinedToolResults = this.orderToolResultsByCallSequence(
+                const combinedToolResults = orderToolResultsByCallSequence(
                     functionCalls,
                     [earlyToolResults, finalExecutionResult.toolResults]
                 );
-                const orderedFunctionResponseParts = this.orderFunctionResponsePartsByCallSequence(
+                const orderedFunctionResponseParts = orderFunctionResponsePartsByCallSequence(
                     functionCalls,
                     [earlyResponseParts, finalExecutionResult.responseParts]
                 );
@@ -1795,12 +1743,18 @@ export class ToolIterationLoopService {
                 );
 
                 if (postToolStopState.shouldStop) {
+                    // CPF-07：主循环已完成（executionResult 非空）——批次收尾：创建 after 并下发
+                    // before + after（幂等；executionResult.checkpoints 因 checkpointMode='skip' 恒为空）
+                    const finalBatchCheckpoints = await finalizeStreamBatchCheckpoints(this.checkpointCoordinator, 
+                        conversationId,
+                        streamBatchCheckpoint
+                    );
                     yield {
                         conversationId,
                         content: finalContent,
                         toolIteration: true as const,
                         toolResults: executionResult.toolResults,
-                        checkpoints: executionResult.checkpoints
+                        checkpoints: finalBatchCheckpoints
                     };
 
                     return;
@@ -1809,6 +1763,21 @@ export class ToolIterationLoopService {
 
             // 13. 如果遇到需要确认的工具，则暂停并等待（仅等待当前这个“队首”工具）
             if (firstConfirmTool) {
+                // CPF-07：autoPrefix 已全部执行完（等待确认中的工具未执行）——
+                // 补建 before（若批内自动工具均未配置 before 而未创建；确认工具可能配置了 before），
+                // 批次 after 推迟到确认路径全部工具执行完成后创建（避免确认前就产生“批次后”存档）。
+                await ensureBatchBeforeForConfirmation(this.checkpointCoordinator, 
+                    conversationId,
+                    streamBatchCheckpoint,
+                    functionCalls,
+                    turnBatch,
+                    batchMessageIndex
+                );
+                const finalBatchCheckpoints = await finalizeStreamBatchCheckpoints(this.checkpointCoordinator, 
+                    conversationId,
+                    streamBatchCheckpoint,
+                    false
+                );
                 yield {
                     conversationId,
                     pendingToolCalls: [{
@@ -1819,7 +1788,7 @@ export class ToolIterationLoopService {
                     content: finalContent,
                     awaitingConfirmation: true as const,
                     toolResults: executionResult?.toolResults,
-                    checkpoints: executionResult?.checkpoints
+                    checkpoints: finalBatchCheckpoints
                 };
 
                 return;
@@ -1827,12 +1796,17 @@ export class ToolIterationLoopService {
 
             // 14. 没有需要确认的工具，说明所有工具均已自动执行完成
             if (executionResult) {
+                // CPF-07：批次收尾（无确认工具路径）——创建 after 并下发 before + after
+                const finalBatchCheckpoints = await finalizeStreamBatchCheckpoints(this.checkpointCoordinator, 
+                    conversationId,
+                    streamBatchCheckpoint
+                );
                 yield {
                     conversationId,
                     content: finalContent,
                     toolIteration: true as const,
                     toolResults: executionResult.toolResults,
-                    checkpoints: executionResult.checkpoints
+                    checkpoints: finalBatchCheckpoints
                 };
             }
 
@@ -1898,6 +1872,9 @@ export class ToolIterationLoopService {
             historyRef[turnStartIndex]?.id,
             isNewTurn,
         );
+        // 回合级工具批次 before 状态：与流式路径一致——同一真实用户回合只创建一次批次前存档，
+        // 每次迭代各自创建批次后存档；确认/隐藏 functionResponse 续跑（isNewTurn=false）复用。
+        const turnBatch = this.resolveTurnBatchCheckpoint(conversationId, turnStartId, isNewTurn);
 
         let promptContext: RequestPromptContext;
         let dynamicContextText: string;
@@ -1955,7 +1932,7 @@ export class ToolIterationLoopService {
                 // 收尾窗口超时返回空结果、核心主循环顶部 break 跳过未启动调用），部分调用
                 // 没有配对 functionResponse。不补占位会在历史留下孤儿 tool_calls——重试/新消息
                 // 时被 rejectAllPendingToolCalls 误标"用户拒绝"，或 formatter 原样发送触发 400。
-                await this.settleCancelledNonStreamToolCalls(conversationId, lastFunctionCalls, lastSettledResult);
+                await settleCancelledNonStreamToolCalls(this.conversationManager, this.log, conversationId, lastFunctionCalls, lastSettledResult);
                 return { exceededMaxIterations: false, cancelled: true };
             }
 
@@ -2168,8 +2145,70 @@ export class ToolIterationLoopService {
             const currentHistory = await this.conversationManager.getHistoryRef(conversationId);
             const messageIndex = currentHistory.length - 1;
 
+            // CPF-07：非流式批次检查点（简化版：无早启动/无确认工具）——回合级 before + 迭代级 after。
+            // 此前非流式路径以 checkpointMode='auto' 调用执行核心，每个工具各自创建一组工具级存档
+            // （toolName=write_file 等）；现与流式路径对齐为批次维度：before 在本回合首个
+            // 「已配置 before 存档」的迭代创建一次（挂本迭代模型消息索引），after 在每次迭代
+            // 工具执行完成后创建（挂本迭代模型消息索引，批内工具名透传按 afterTools 精确判定）；
+            // 执行核心传 checkpointMode='skip'，避免工具级存档与批次存档重复。
+            const guardedCalls = repeatedCallGuard.guardCalls(functionCalls);
+            const batchToolNames = guardedCalls.map(c => c.name);
+            // CP-PARTIAL-1：非流式批次同样按受影响路径构建部分快照（任一工具无法确定则回退全量）
+            const workspaceRootFsPath = runtimeContext?.workspaceUri
+                ? (workspaceUriToFsPath(runtimeContext.workspaceUri) ?? undefined)
+                : undefined;
+            const nonStreamBatch: StreamToolBatchCheckpointState = {
+                beforeCheckpoint: null,
+                beforeCreated: false,
+                needsCheckpoint: false,
+                afterCheckpoint: null,
+                finalized: false,
+                batchToolNames: new Set(batchToolNames),
+                workspaceRootFsPath,
+                affectedPathsResolved: false
+            };
+            collectAffectedPaths(nonStreamBatch, guardedCalls, workspaceRootFsPath);
+            const checkpointService = this.checkpointService;
+            // 回合级 before：本真实用户回合第一个「已配置 before 存档」的迭代创建一次
+            if (checkpointService && !turnBatch.beforeCreated) {
+                if (guardedCalls.some(c => checkpointService.isToolConfiguredForCheckpoint(c.name, c.args, 'before'))) {
+                    turnBatch.beforeCreated = true;
+                    try {
+                        const beforeCheckpoint = await checkpointService.createToolExecutionCheckpoint(
+                            conversationId,
+                            messageIndex,
+                            'tool_batch',
+                            'before',
+                            undefined,
+                            {
+                                batchToolNames,
+                                ...(nonStreamBatch.affectedPaths
+                                    ? { affectedPaths: nonStreamBatch.affectedPaths }
+                                    : {})
+                            }
+                        );
+                        if (beforeCheckpoint) {
+                            // 回合级写回：before 在真实用户回合内只创建一次
+                            turnBatch.beforeCheckpoint = beforeCheckpoint;
+                            turnBatch.messageIndex = messageIndex;
+                        } else {
+                            // 配置未命中：回合状态同步（允许后续迭代补建）
+                            turnBatch.beforeCreated = false;
+                        }
+                    } catch (error) {
+                        this.log.warn('checkpoint.batch_before_failed', {
+                            conversationId,
+                            iteration,
+                            error: (error as Error)?.message ?? String(error)
+                        });
+                        // 创建异常降级为无存档执行（本回合不再重试）
+                        turnBatch.beforeCreated = true;
+                    }
+                }
+            }
+
             const executionResult = await this.toolExecutionService.executeFunctionCallsWithResults(
-                repeatedCallGuard.guardCalls(functionCalls),
+                guardedCalls,
                 conversationId,
                 messageIndex,
                 config,
@@ -2186,9 +2225,40 @@ export class ToolIterationLoopService {
                 // 当前对话绑定的工作区 URI（用于工具执行的工作区限定/记忆路由）
                 runtimeContext?.workspaceUri,
                 // General Worker 模型继承：把主会话当前模型透传给工具上下文
-                modelOverride
+                modelOverride,
+                // CPF-07：批次检查点由本循环统一创建，执行核心跳过工具级检查点
+                'skip'
             );
             repeatedCallGuard.recordResults(executionResult.toolResults);
+
+            // 迭代级 after（批次维度）：批内工具命中 afterTools 才创建（CheckpointManager 内部
+            // 再按 afterTools 精确判定）；取消/中止不补（与流式语义一致）。存档已持久化到
+            // CheckpointManager（元数据 + 快照），前端经 checkpoint.getCheckpoints（loadCheckpoints）
+            // 读取可见——非流式响应协议不含 checkpoints 通道，不做协议扩展（最小改动）。
+            if (checkpointService && !abortSignal?.aborted
+                && guardedCalls.some(c => checkpointService.isToolConfiguredForCheckpoint(c.name, c.args, 'after'))) {
+                try {
+                    await checkpointService.createToolExecutionCheckpoint(
+                        conversationId,
+                        messageIndex,
+                        'tool_batch',
+                        'after',
+                        undefined,
+                        {
+                            batchToolNames,
+                            ...(nonStreamBatch.affectedPaths
+                                ? { affectedPaths: nonStreamBatch.affectedPaths }
+                                : {})
+                        }
+                    );
+                } catch (error) {
+                    this.log.warn('checkpoint.batch_after_failed', {
+                        conversationId,
+                        iteration,
+                        error: (error as Error)?.message ?? String(error)
+                    });
+                }
+            }
             // 非流式 abort 结算状态更新：记录本次已结算（真实结果/cancelled 占位）的调用，
             // abort 分支据此只补未配对调用的占位，已执行完的真实结果保持原样。
             lastSettledResult = executionResult;
@@ -2232,7 +2302,7 @@ export class ToolIterationLoopService {
                 }
             } finally {
                 if (abortSignal?.aborted) {
-                    await this.settleCancelledNonStreamToolCalls(conversationId, lastFunctionCalls, lastSettledResult);
+                    await settleCancelledNonStreamToolCalls(this.conversationManager, this.log, conversationId, lastFunctionCalls, lastSettledResult);
                 }
             }
             
@@ -2248,32 +2318,6 @@ export class ToolIterationLoopService {
         };
     }
 
-    /**
-     * 创建模型消息前的检查点
-     *
-     * @param conversationId 对话 ID
-     * @param iteration 当前迭代次数
-     * @returns 检查点数据（用于 yield）或 null
-     */
-    private async createBeforeModelCheckpoint(
-        conversationId: string,
-        iteration: number
-    ): Promise<ChatStreamCheckpointsData | null> {
-        const checkpoint = await this.checkpointService.createModelMessageCheckpoint(
-            conversationId,
-            'before',
-            iteration
-        );
-        if (!checkpoint) {
-            return null;
-        }
-
-        return {
-            conversationId,
-            checkpoints: [checkpoint],
-            checkpointOnly: true as const
-        };
-    }
 }
 
 

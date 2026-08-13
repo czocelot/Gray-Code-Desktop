@@ -62,8 +62,12 @@ export {
     type SubAgentRunConversationStore
 } from './runEventBus';
 
-// 分离转后台任务桥（本地未引入上游 detachedTaskBridge 后台任务体系，
-// detach 回执经既有展示层处理，见 streamAbortDetach 适配说明）
+// 分离/显式后台任务桥
+export {
+    bindBackgroundSubAgentTask,
+    unbindBackgroundSubAgentTask,
+    registerDetachedSubAgentTask
+} from './detachedTaskBridge';
 export { SubAgentTranscriptRepository } from './SubAgentTranscriptRepository';
 export {
     subAgentRunController,
@@ -77,8 +81,7 @@ export {
     getSubAgentsTool,
     getSubAgentsToolDeclaration,
     hasAvailableSubAgent,
-    refreshSubAgentsTool,
-    registerSubAgents 
+    refreshSubAgentsTool
 } from './subagents';
 
 // 导出 agent 消息信箱（A-COMM）

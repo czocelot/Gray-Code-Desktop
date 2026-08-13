@@ -8,39 +8,40 @@
  * 3. 可展开/收起详细内容
  * 4. 支持自定义内容面板组件
  * 5. 通过工具 ID 从 store 获取响应结果
+ *
+ * F-07 拆分后职责：保留确认流、diff 孤儿检测、工具响应增强、展开状态等
+ * 状态与副作用；单张工具卡的展示下放到 toolMessage/ToolItem.vue，
+ * diff 操作栏下放到 toolMessage/DiffActionList.vue，工具内容渲染逻辑
+ * 抽到 toolMessage/renderToolContent.ts。
  */
 
 import { MESSAGE_NAMES } from '@shared/protocol'
-import { ref, computed, h, watchEffect, watch, nextTick, defineComponent, type PropType, type Component, type ComponentPublicInstance } from 'vue'
+import { ref, computed, watchEffect, watch, nextTick, defineComponent, type PropType, type ComponentPublicInstance } from 'vue'
 import type { ToolUsage } from '../../types'
-import { getToolConfig, type ToolActionConfig, type ToolActionContext } from '../../utils/toolRegistry'
+import { getToolConfig } from '../../utils/toolRegistry'
 import { ensureMcpToolRegistered } from '../../utils/tools'
 import { useChatStore } from '../../stores'
 import { useBackgroundTaskStore } from '../../stores/backgroundTaskStore'
-import { sendToExtension, showNotification } from '../../utils/vscode'
+import { sendToExtension } from '../../utils/vscode'
 import { useI18n } from '../../i18n'
 import { generateId, decodeUnicodeEscapes } from '../../utils/format'
 import { shouldShowToolArgumentPreview } from './toolPreviewPolicy'
 import { computeTaskCardStatus } from '../../utils/tools/subagents/backgroundStatus'
 import {
-  confirmDiff,
   diffGuardWarnings,
   ensureDiffReviewControllerInitialized,
-  getActionErrorMessage,
   getDiffActionError,
   getDiffAutoSaveProgress,
-  getDiffAutoSaveProgressById,
   getDiffAutoSaveTimeLeft,
-  getDiffAutoSaveTimeLeftById,
   getPendingDiffSessions,
-  globalApplyDiffConfig,
   hasPendingDiffSession,
   isDiffSessionProcessing,
   persistedDiffGuardWarnings,
-  rejectDiff,
-  seenDiffToolIds,
-  type PendingDiffSession
+  seenDiffToolIds
 } from './diffReviewController'
+import { renderToolContent } from './toolMessage/renderToolContent'
+import type { PendingDiffView } from './toolMessage/types'
+import ToolItem from './toolMessage/ToolItem.vue'
 
 const { t } = useI18n()
 
@@ -56,14 +57,6 @@ const DIFF_SUPPORTED_TOOLS = ['apply_diff', 'write_file', 'search_in_files', 'in
 const pendingDiffOrphanedAt = ref<Map<string, number>>(new Map())
 const DIFF_ORPHAN_GRACE_MS = 800
 const orphanCheckTick = ref(0)
-
-interface PendingDiffView extends PendingDiffSession {
-  progress: number
-  timeLeft: number
-  isPreparing: boolean
-  isProcessing: boolean
-  error: string | undefined
-}
 
 const pendingDiffViewsByToolId = computed<Map<string, PendingDiffView[]>>(() => {
   const views = new Map<string, PendingDiffView[]>()
@@ -148,7 +141,7 @@ const enhancedTools = computed<ToolUsage[]>(() => {
       // 优先从响应中获取错误
       const error = tool.error || (response as any).error
       let success = (response as any).success !== false && !error
-      
+
       const data = (response as any).data
 
       if (activePendingDiff) {
@@ -207,10 +200,6 @@ const enhancedTools = computed<ToolUsage[]>(() => {
       }
 
       // 检查是否为部分成功 (针对 apply_diff 等工具)
-      // 判定条件：后端显式标记 partial（status='partial' 或 partial=true），或结果计数同时存在成功与失败。
-      // 后端在 partial 时会返回修正后的 finalAppliedCount/finalFailedCount；
-      // 计数兜底用于兼容旧版本工具（未显式标记 partial 但混合成败）。
-      // 显式排除 pending：partial 标记不会与 pending 共存，避免误覆盖 awaiting_apply。
       if (success && data && data.status !== 'pending' && (data.partial === true || data.status === 'partial' || (data.appliedCount > 0 && data.failedCount > 0))) {
         status = 'warning'
       }
@@ -224,12 +213,12 @@ const enhancedTools = computed<ToolUsage[]>(() => {
         awaitingConfirmation: false
       }
     }
-    
+
     // 如果正在处理确认/执行中的过渡态
     if (processingToolIds.value.has(tool.id)) {
       return { ...tool, status: 'executing' as const, awaitingConfirmation: false }
     }
-    
+
     // 等待用户批准
     const awaitingConfirm = tool.status === 'awaiting_approval'
 
@@ -246,23 +235,13 @@ const enhancedTools = computed<ToolUsage[]>(() => {
       getPendingDiffSessions(tool.id).length === 0 &&
       (effectiveStatus === 'executing' || effectiveStatus === 'awaiting_apply')
     ) {
-      const now = Date.now()
+      // 孤儿宽限期判定：进入时间的记录与届满重估定时器由下方的
+      // watch(syncPendingDiffOrphanState) 维护，computed 只做纯读（保持纯函数）。
       const existed = pendingDiffOrphanedAt.value.get(tool.id)
-      const since = existed ?? now
-      if (!existed) {
-        pendingDiffOrphanedAt.value.set(tool.id, now)
-        pendingDiffOrphanedAt.value = new Map(pendingDiffOrphanedAt.value)
-        // 安排宽限期届满后的重估（#59 修复）
-        const capturedToolId = tool.id
-        setTimeout(() => {
-          if (pendingDiffOrphanedAt.value.has(capturedToolId)) {
-            orphanCheckTick.value++
-          }
-        }, DIFF_ORPHAN_GRACE_MS)
-      }
+      const since = existed ?? Date.now()
 
       // 宽限期内保持原状态，避免 UI 闪烁（先 error 再 success）。
-      if (now - since < DIFF_ORPHAN_GRACE_MS) {
+      if (Date.now() - since < DIFF_ORPHAN_GRACE_MS) {
         return { ...tool, status: effectiveStatus, awaitingConfirmation: false }
       }
 
@@ -272,12 +251,6 @@ const enhancedTools = computed<ToolUsage[]>(() => {
         error: tool.error || t('components.tools.cancelled'),
         awaitingConfirmation: false
       }
-    }
-
-    // 非 executing/awaiting_apply 场景，清理 orphan 记录
-    if (pendingDiffOrphanedAt.value.has(tool.id) && effectiveStatus !== 'executing' && effectiveStatus !== 'awaiting_apply') {
-      pendingDiffOrphanedAt.value.delete(tool.id)
-      pendingDiffOrphanedAt.value = new Map(pendingDiffOrphanedAt.value)
     }
 
     // diff 工具：如果 diff 处于 pending（等待应用/审阅），将状态映射为 awaiting_apply
@@ -293,6 +266,64 @@ const enhancedTools = computed<ToolUsage[]>(() => {
     return { ...tool, status: effectiveStatus, awaitingConfirmation: awaitingConfirm }
   })
 })
+
+/**
+ * 孤儿检测副作用（#59 修复，从 enhancedTools computed 中移出）：
+ * 依据原始工具状态维护 pendingDiffOrphanedAt 记录，并在宽限期届满时安排重估定时器。
+ * 幂等：已记录的 id 不重复记录；非孤儿候选（含已收到响应、状态离开 executing/awaiting_apply）
+ * 时清理记录，与旧 computed 内联逻辑语义一致。
+ */
+function syncPendingDiffOrphanState(): void {
+  const next = new Map(pendingDiffOrphanedAt.value)
+  let changed = false
+
+  for (const tool of props.tools) {
+    const isDiffTool = DIFF_SUPPORTED_TOOLS.includes(tool.name)
+    let isDiffApplicable = true
+    if (tool.name === 'search_in_files') {
+      const args = tool.args as Record<string, unknown>
+      isDiffApplicable = args?.mode === 'replace'
+    }
+
+    // 与 computed 一致：已有响应时孤儿分支不会执行，无需维护记录
+    const response = tool.result || (tool.id ? chatStore.getToolResponseById(tool.id) : undefined)
+    if (response) continue
+
+    const effectiveStatus = tool.status || 'queued'
+    const isOrphanCandidate =
+      isDiffTool &&
+      isDiffApplicable &&
+      seenDiffToolIds.value.has(tool.id) &&
+      getPendingDiffSessions(tool.id).length === 0 &&
+      (effectiveStatus === 'executing' || effectiveStatus === 'awaiting_apply')
+
+    if (isOrphanCandidate) {
+      if (!next.has(tool.id)) {
+        next.set(tool.id, Date.now())
+        changed = true
+        // 安排宽限期届满后的重估（#59 修复）
+        const capturedToolId = tool.id
+        setTimeout(() => {
+          if (pendingDiffOrphanedAt.value.has(capturedToolId)) {
+            orphanCheckTick.value++
+          }
+        }, DIFF_ORPHAN_GRACE_MS)
+      }
+    } else if (next.has(tool.id)) {
+      // 非 executing/awaiting_apply 场景，清理 orphan 记录
+      next.delete(tool.id)
+      changed = true
+    }
+  }
+
+  if (changed) {
+    pendingDiffOrphanedAt.value = next
+  }
+}
+
+// 工具状态 / diff 会话视图变化时同步孤儿记录；pendingDiffViewsByToolId 覆盖
+// 会话级（pending diff 增删、处理状态）变化，props.tools 覆盖原始状态变化。
+watch([() => props.tools, pendingDiffViewsByToolId], syncPendingDiffOrphanState, { immediate: true })
 
 // 正在处理确认的工具 ID 集合
 
@@ -377,8 +408,13 @@ async function sendToolConfirmation(
 
     // 为本次工具确认流绑定 streamId，避免流式过滤器把后端返回的 chunk 当作“未知流”丢弃
     const streamId = generateId()
-    chatStore.activeStreamId = streamId
-    chatStore.isWaitingForResponse = true
+    chatStore.beginToolConfirmationRound({
+      conversationId: currentConversationId,
+      configId: confirmationConfigId,
+      modelOverride: chatStore.pendingModelOverride || undefined,
+      promptModeId: chatStore.currentPromptModeId,
+      streamId
+    })
 
     await sendToExtension(MESSAGE_NAMES.toolConfirmation, {
       conversationId: currentConversationId,
@@ -393,14 +429,12 @@ async function sendToolConfirmation(
     console.error('Failed to send tool confirmation:', error)
 
     // 请求未发出时回滚 stream 绑定，避免阻塞后续有效流
-    chatStore.activeStreamId = null
-    chatStore.isWaitingForResponse = false
+    chatStore.abortToolConfirmationRound()
     return false
   }
 }
 
 // 展开状态
-// eslint-disable-next-line no-undef
 const expandedTools = ref<Set<string>>(new Set())
 
 // 切换展开/收起
@@ -417,107 +451,11 @@ function isExpanded(toolId: string): boolean {
   return expandedTools.value.has(toolId)
 }
 
-// 获取工具显示名称
-function getToolLabel(tool: ToolUsage): string {
-  const config = getToolConfig(tool.name)
-  // 优先使用动态 labelFormatter
-  if (config?.labelFormatter) {
-    return config.labelFormatter(tool.args)
-  }
-  return config?.label || tool.name
-}
-
-// 获取工具图标
-function getToolIcon(tool: ToolUsage): string {
-  const config = getToolConfig(tool.name)
-  return config?.icon || 'codicon-tools'
-}
-
-// 获取工具描述
-function getToolDescription(tool: ToolUsage): string {
-  const config = getToolConfig(tool.name)
-
-  // 流式状态：如果 args 有数据（partialArgs 已成功解析），仍尝试用 formatter
-  // 否则显示 "正在生成参数..."
-  if (tool.status === 'streaming') {
-    const hasArgs = tool.args && Object.keys(tool.args).length > 0
-    if (hasArgs && config?.descriptionFormatter) {
-      try {
-        return config.descriptionFormatter(tool.args)
-      } catch {
-        // formatter 崩溃时降级显示，避免整个工具块渲染失败
-      }
-    }
-    return t('components.message.tool.streamingArgs')
-  }
-
-  if (config?.descriptionFormatter) {
-    try {
-      return config.descriptionFormatter(tool.args)
-    } catch {
-      // formatter 崩溃时降级到默认描述
-    }
-  }
-  // 默认描述：显示参数数量
-  const argCount = Object.keys(tool.args || {}).length
-  return t('components.message.tool.paramCount', { count: argCount })
-}
-
 // 检查工具是否可展开
 function isExpandable(tool: ToolUsage): boolean {
   const config = getToolConfig(tool.name)
   // 默认可展开，除非显式设置为 false
   return config?.expandable !== false
-}
-
-function getToolActionContext(): ToolActionContext {
-  return {
-    conversationId: chatStore.currentConversationId || null
-  }
-}
-
-function getToolActionLabel(action: ToolActionConfig, tool: ToolUsage): string {
-  const context = getToolActionContext()
-  return typeof action.label === 'function' ? action.label(tool, context) : action.label
-}
-
-function getToolActionTitle(action: ToolActionConfig, tool: ToolUsage): string {
-  const context = getToolActionContext()
-  if (!action.title) return getToolActionLabel(action, tool)
-  return typeof action.title === 'function' ? action.title(tool, context) : action.title
-}
-
-function getVisibleToolActions(tool: ToolUsage): ToolActionConfig[] {
-  const config = getToolConfig(tool.name)
-  const context = getToolActionContext()
-  return (config?.actions || []).filter(action => {
-    if (!action.visible) return true
-    try {
-      return action.visible(tool, context)
-    } catch (error) {
-      console.error(`[ToolMessage] Failed to evaluate action visibility for ${tool.name}:${action.id}`, error)
-      return false
-    }
-  })
-}
-
-async function runToolAction(action: ToolActionConfig, tool: ToolUsage) {
-  try {
-    await action.run(tool, getToolActionContext())
-  } catch (error) {
-    const message = getActionErrorMessage(error, `Failed to run action: ${action.id}`)
-    await showNotification(message, 'error')
-    console.error(`[ToolMessage] Failed to run action ${action.id} for ${tool.name}`, error)
-  }
-}
-
-function getToolActionClass(action: ToolActionConfig): string[] {
-  const variant = action.variant || 'default'
-  return ['tool-action-btn', `tool-action-${variant}`]
-}
-
-function canToggleExpand(tool: ToolUsage): boolean {
-  return isExpandable(tool)
 }
 
 function shouldShowToolContent(tool: ToolUsage): boolean {
@@ -535,7 +473,6 @@ function getDiffGuardWarning(tool: ToolUsage): { warning: string; deletePercent:
     return persisted
   }
 
-
   const data = (tool.result as any)?.data
   if (data?.diffGuardWarning) {
     return {
@@ -544,61 +481,6 @@ function getDiffGuardWarning(tool: ToolUsage): { warning: string; deletePercent:
     }
   }
   return null
-}
-
-// 获取状态图标
-function getStatusIcon(status?: string, awaitingConfirmation?: boolean): string {
-  // 向后兼容：awaitingConfirmation 逐步迁移到 status = awaiting_approval
-  if (awaitingConfirmation || status === 'awaiting_approval') {
-    return 'codicon-shield'
-  }
-
-  switch (status) {
-    case 'streaming':
-      return 'codicon-loading'
-    case 'queued':
-      return 'codicon-clock'
-    case 'executing':
-      return 'codicon-loading'
-    case 'awaiting_apply':
-      return 'codicon-diff'
-    case 'background':
-      return 'codicon-server-process'
-    case 'success':
-      return 'codicon-check'
-    case 'warning':
-      return 'codicon-warning'
-    case 'error':
-      return 'codicon-error'
-    default:
-      return ''
-  }
-}
-
-// 获取状态类名
-function getStatusClass(status?: string, awaitingConfirmation?: boolean): string {
-  if (awaitingConfirmation || status === 'awaiting_approval') {
-    return 'status-warning'
-  }
-
-  switch (status) {
-    case 'background':
-      return 'status-background'
-    case 'success':
-      return 'status-success'
-    case 'error':
-      return 'status-error'
-    case 'warning':
-      return 'status-warning'
-    case 'executing':
-    case 'streaming':
-      return 'status-running'
-    case 'queued':
-    case 'awaiting_apply':
-      return 'status-pending'
-    default:
-      return ''
-  }
 }
 
 // --- 流式预览 ---
@@ -661,81 +543,6 @@ watch(
     }
   }
 )
-
-// 渲染工具内容
-function renderToolContent(tool: ToolUsage) {
-  const config = getToolConfig(tool.name)
-  
-  // 如果有自定义组件，使用自定义组件
-  if (config?.contentComponent) {
-    return h(config.contentComponent as Component, {
-      args: tool.args,
-      result: tool.result,
-      error: tool.error,
-      status: tool.status,
-      toolId: tool.id,
-      toolName: tool.name,
-      messageBackendIndex: props.messageBackendIndex,
-      pendingDiffs: getPendingDiffSessions(tool.id),
-      diffActionController: {
-        autoSaveEnabled: globalApplyDiffConfig.value.autoSave,
-        getTimeLeft: getDiffAutoSaveTimeLeftById,
-        getProgress: getDiffAutoSaveProgressById,
-        isProcessing: isDiffSessionProcessing,
-        getError: getDiffActionError,
-        confirm: confirmDiff,
-        reject: rejectDiff
-      }
-    })
-  }
-  
-  // 如果有内容格式化器，使用格式化器
-  if (config?.contentFormatter) {
-    let content: unknown = null
-    try {
-      content = config.contentFormatter(tool.args, tool.result)
-    } catch {
-      // formatter 崩溃时降级到默认 JSON 展示，避免整个工具块渲染失败
-      content = null
-    }
-
-    // formatter 正常返回非空内容：按原有结构展示；否则落到下方默认 JSON 展示
-    if (content) {
-      const children: any[] = []
-
-      // content 类型为 unknown（formatter 返回值容错化）；h() 的 children 参数要求 RawChildren，此处断言 any 保持运行时行为不变
-      children.push(h('div', { class: 'tool-content-text' }, content as any))
-
-      if (tool.error) {
-        children.push(
-          h('div', { class: 'content-section error-section' }, [
-            h('div', { class: 'section-label' }, t('components.message.tool.error') + ':'),
-            h('div', { class: 'error-message' }, tool.error)
-          ])
-        )
-      }
-
-      return h('div', { class: 'tool-content-default' }, children)
-    }
-  }
-  
-  // 默认显示：参数和结果的 JSON
-  return h('div', { class: 'tool-content-default' }, [
-    tool.args && h('div', { class: 'content-section' }, [
-      h('div', { class: 'section-label' }, t('components.message.tool.parameters') + ':'),
-      h('pre', { class: 'section-data' }, JSON.stringify(tool.args, null, 2))
-    ]),
-    tool.result && h('div', { class: 'content-section' }, [
-      h('div', { class: 'section-label' }, t('components.message.tool.result') + ':'),
-      h('pre', { class: 'section-data' }, JSON.stringify(tool.result, null, 2))
-    ]),
-    tool.error && h('div', { class: 'content-section error-section' }, [
-      h('div', { class: 'section-label' }, t('components.message.tool.error') + ':'),
-      h('div', { class: 'error-message' }, tool.error)
-    ])
-  ])
-}
-
 /**
  * 身份稳定的宿主组件（#56 修复）。
  *
@@ -749,174 +556,31 @@ const ToolContentHost = defineComponent({
     tool: { type: Object as PropType<ToolUsage>, required: true }
   },
   setup(hostProps) {
-    return () => renderToolContent(hostProps.tool)
+    return () => renderToolContent(hostProps.tool, props.messageBackendIndex, t)
   }
 })
 </script>
 
 <template>
   <div class="tool-message">
-    <div
+    <ToolItem
       v-for="tool in enhancedTools"
       :key="tool.id"
-      class="tool-item"
-    >
-      <!-- 工具头部 - 可点击展开/收起（如果可展开） -->
-      <div
-        :class="['tool-header', { 'not-expandable': !canToggleExpand(tool) }]"
-        @click="canToggleExpand(tool) && toggleExpand(tool.id)"
-      >
-        <div class="tool-info">
-          <!-- 展开/收起图标（仅当可展开时显示） -->
-          <span
-            v-if="canToggleExpand(tool)"
-            :class="[
-              'expand-icon',
-              'codicon',
-              isExpanded(tool.id) ? 'codicon-chevron-down' : 'codicon-chevron-right'
-            ]"
-          ></span>
-          
-          <!-- 工具图标 -->
-          <span :class="['tool-icon', 'codicon', getToolIcon(tool)]"></span>
-          
-          <!-- 工具名称 -->
-          <span class="tool-name">{{ getToolLabel(tool) }}</span>
-          
-          <!-- 状态图标 -->
-          <div v-if="tool.status || tool.awaitingConfirmation" class="status-icon-wrapper">
-            <span
-              :class="[
-                'status-icon',
-                'codicon',
-                getStatusIcon(tool.status, tool.awaitingConfirmation),
-                getStatusClass(tool.status, tool.awaitingConfirmation)
-              ]"
-            ></span>
-          </div>
-          
-          <!-- 执行时间 -->
-          <span v-if="tool.duration" class="tool-duration">
-            {{ tool.duration }}ms
-          </span>
-        </div>
-        
-        <!-- 工具描述和操作按钮 -->
-        <div class="tool-description-row">
-          <div class="tool-description">
-            {{ getToolDescription(tool) }}
-          </div>
-          
-          <div class="tool-action-buttons">
-            <!-- 确认按钮：当工具等待用户批准时显示 -->
-            <button
-              v-if="tool.status === 'awaiting_approval' && !processingToolIds.has(tool.id)"
-              class="confirm-btn"
-              :title="t('components.message.tool.confirmExecution')"
-              :disabled="processingToolIds.has(tool.id)"
-              @click.stop="confirmToolExecution(tool.id, tool.name)"
-            >
-              <span class="confirm-btn-icon codicon codicon-check"></span>
-              <span class="confirm-btn-text">{{ t('components.message.tool.confirm') }}</span>
-            </button>
-            
-            <!-- 拒绝按钮：当工具等待用户批准时显示 -->
-            <button
-              v-if="tool.status === 'awaiting_approval' && !processingToolIds.has(tool.id)"
-              class="reject-btn"
-              :title="t('components.message.tool.reject')"
-              :disabled="processingToolIds.has(tool.id)"
-              @click.stop="rejectToolExecution(tool.id, tool.name)"
-            >
-              <span class="reject-btn-icon codicon codicon-close"></span>
-              <span class="reject-btn-text">{{ t('components.message.tool.reject') }}</span>
-            </button>
-            
-            <!-- 通用工具操作按钮：diff 预览、SubAgent 详情等都走 ToolConfig.actions -->
-            <button
-              v-for="action in getVisibleToolActions(tool)"
-              :key="action.id"
-              :class="getToolActionClass(action)"
-              :title="getToolActionTitle(action, tool)"
-              @click.stop="runToolAction(action, tool)"
-            >
-              <span
-                v-if="action.icon"
-                :class="['tool-action-icon', 'codicon', action.icon]"
-              ></span>
-              <span class="tool-action-text">{{ getToolActionLabel(action, tool) }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 流式参数预览 - streaming 状态时自动显示 -->
-      <div
-        v-if="shouldShowStreamingPreview(tool)"
-        class="streaming-preview"
-        :ref="setStreamingPreviewRef(tool.id)"
-      >
-        <pre class="streaming-preview-content">{{ getStreamingPreviewText(tool) }}</pre>
-      </div>
-
-      <!-- 工具详细内容 - 展开时显示（仅当可展开时） -->
-      <div v-if="shouldShowToolContent(tool)" class="tool-content">
-        <component :is="ToolContentHost" :tool="tool" />
-      </div>
-
-      <!-- Diff 警戒值警告（pending 或已结束都可展示） -->
-      <div v-if="getDiffGuardWarning(tool)" class="diff-guard-warning">
-        <i class="codicon codicon-warning"></i>
-        <span class="diff-guard-text">
-          {{ getDiffGuardWarning(tool)!.warning }}
-        </span>
-      </div>
-
-      <!-- Diff 工具确认操作栏（按独立 pending diff 渲染，不随展开面板隐藏） -->
-      <div v-if="(pendingDiffViewsByToolId.get(tool.id) || []).length > 0" class="diff-action-list">
-        <div v-for="pendingDiff in pendingDiffViewsByToolId.get(tool.id) || []" :key="pendingDiff.id" class="diff-action-footer">
-          <div class="diff-action-file">
-            <span class="codicon codicon-file-code"></span>
-            <span class="diff-action-file-path">{{ pendingDiff.filePath }}</span>
-          </div>
-          <div class="footer-top" v-if="globalApplyDiffConfig.autoSave">
-            <template v-if="pendingDiff.autoSaveAt !== undefined">
-              <div class="timer-container">
-                <div class="timer-bar" :style="{ width: pendingDiff.progress + '%' }"></div>
-              </div>
-              <span class="timer-text">{{ (pendingDiff.timeLeft / 1000).toFixed(1) }}s</span>
-            </template>
-            <span v-else-if="pendingDiff.isPreparing" class="timer-text">{{ t('common.loading') }}</span>
-          </div>
-          <div class="footer-buttons">
-            <button
-              class="confirm-btn-primary"
-              :disabled="pendingDiff.isProcessing"
-              @click.stop="confirmDiff(pendingDiff.id)"
-            >
-              <span class="codicon codicon-check"></span>
-              {{ t('common.save') }}
-            </button>
-            <button
-              class="reject-btn-secondary"
-              :disabled="pendingDiff.isProcessing"
-              @click.stop="rejectDiff(pendingDiff.id)"
-            >
-              <span class="codicon codicon-close"></span>
-              {{ t('components.message.tool.reject') }}
-            </button>
-          </div>
-          <div v-if="pendingDiff.isProcessing" class="diff-action-state">
-            <span class="codicon codicon-loading codicon-modifier-spin"></span>
-            <span>{{ pendingDiff.isPreparing ? t('common.loading') : t('components.tools.executing') }}</span>
-          </div>
-          <div v-else-if="pendingDiff.error" class="diff-action-error">
-            <span class="codicon codicon-error"></span>
-            <span>{{ pendingDiff.error }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
+      :tool="tool"
+      :is-expanded="isExpanded(tool.id)"
+      :is-expandable="isExpandable(tool)"
+      :show-content="shouldShowToolContent(tool)"
+      :is-processing="processingToolIds.has(tool.id)"
+      :show-streaming-preview="shouldShowStreamingPreview(tool)"
+      :streaming-preview-text="getStreamingPreviewText(tool)"
+      :pending-diffs="pendingDiffViewsByToolId.get(tool.id) || []"
+      :diff-guard-warning="getDiffGuardWarning(tool)"
+      :content-host="ToolContentHost"
+      :register-streaming-preview-ref="setStreamingPreviewRef(tool.id)"
+      @toggle="toggleExpand(tool.id)"
+      @confirm="confirmToolExecution(tool.id, tool.name)"
+      @reject="rejectToolExecution(tool.id, tool.name)"
+    />
   </div>
 </template>
 

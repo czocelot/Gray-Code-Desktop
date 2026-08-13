@@ -5,7 +5,8 @@
  * Tool parameters are dynamically generated, each parameter corresponds to a skill
  */
 
-import type { Tool, ToolDeclaration, ToolResult, ToolRegistration } from '../types';
+import type { Tool, ToolDeclaration, ToolResult, ToolRegistration, ToolArgs } from '../types';
+import { parseArgs } from '../types';
 import { getSkillsManager } from '../../modules/skills';
 
 /**
@@ -55,7 +56,8 @@ export function generateSkillsToolDeclaration(): ToolDeclaration {
 /**
  * Skills toggle tool handler function
  */
-async function handleToggleSkills(args: Record<string, boolean>): Promise<ToolResult> {
+async function handleToggleSkills(args: ToolArgs): Promise<ToolResult> {
+    const booleanArgs = parseArgs<Record<string, boolean>>(args);
     const skillsManager = getSkillsManager();
     
     if (!skillsManager) {
@@ -76,7 +78,7 @@ async function handleToggleSkills(args: Record<string, boolean>): Promise<ToolRe
     }
     
     // Process each argument
-    for (const [name, shouldSend] of Object.entries(args)) {
+    for (const [name, shouldSend] of Object.entries(booleanArgs)) {
         const skillId = nameToId[name];
         
         if (!skillId) {

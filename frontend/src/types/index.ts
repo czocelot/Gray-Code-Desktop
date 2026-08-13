@@ -362,6 +362,8 @@ export interface UIConfig {
 export interface VSCodeMessage<T = any> {
   type: string
   requestId?: string
+  /** 扩展下发的 command 消息携带命令名（type === 'command' 时存在） */
+  command?: string
   data: T
 }
 
@@ -852,3 +854,8 @@ export * from './editorNode'
 // ============ 用量统计类型 ============
 
 export * from './usage'
+
+// ============ 渠道配置与设置子对象契约（F-09） ============
+
+export * from './channelConfig'
+export * from './settingsConfig'

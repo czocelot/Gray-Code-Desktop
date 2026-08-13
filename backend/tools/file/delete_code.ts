@@ -8,15 +8,17 @@
 
 import * as fs from 'fs';
 import type { Tool, ToolResult, ToolContext } from '../types';
+import { parseArgs } from '../types';
 import { resolveUriWithInfo, getAllWorkspaces, normalizeLineEndingsToLF, detectNonUtf8Encoding, formatFileSize } from '../utils';
-import { getDiffManager, type DiffResolutionReason } from '../../core/services/diffManager';
-import { getDiffStorageManager } from '../../modules/conversation';
+import { getDiffManager } from '../../core/services/diffManager';
 import { ensureOutsideWorkspaceAccessApproved } from './outsideWorkspaceAccess';
+import { resolveDiffOutcome } from './diff/resolveDiffOutcome';
 import type { LockHolder } from '../../core/fileWriteLockManager';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
 
-// 文件大小护栏（与 read_file/search_in_files 的 5MB 上限一致）：
-// 超大文件全量 readFileSync 会阻塞 extension host 并全量读入内存。
-const MAX_EDIT_FILE_BYTES = 5 * 1024 * 1024;
+// 文件大小护栏（与 read_file/search_in_files 的 5MB 上限一致）已统一收敛到 shared/fileSizeGuards
+import { MAX_EDIT_FILE_BYTES } from '../shared/fileSizeGuards';
 
 /**
  * 单个删除条目
@@ -25,6 +27,13 @@ interface DeleteCodeEntry {
     path: string;
     start_line: number;
     end_line: number;
+}
+
+/**
+ * delete_code 的规范化参数形状。
+ */
+interface DeleteCodeArgs {
+    files: DeleteCodeEntry[];
 }
 
 /**
@@ -190,37 +199,17 @@ async function deleteSingleFile(
             { confirmedByToolConfirmation: approvedByToolConfirmation === true, conversationId, checkpointReady, lockHolder }
         );
 
-        // 等待用户处理
-        // 修改原因：本地 waitForDiffResolution 包装只是透传，删除重复包装直接调用。
-        const interruptReason = await diffManager.waitForDiffResolution(pendingDiff.id, abortSignal);
-
-        // 用户“拒绝”（rejected）与“中断/取消”（abort/user）分开处理：
-        // rejected → status:'rejected' + 可读错误（不标记 cancelled）；abort/user → cancelled: true
-        const wasRejected = interruptReason === 'rejected';
-        const wasInterrupted = interruptReason === 'abort' || interruptReason === 'user';
-        const finalDiff = diffManager.getDiff(pendingDiff.id);
-        // 由 waitForDiffResolution 的终态语义判定：'rejected'（含被 FIFO 淘汰后留痕的拒绝）
-        // 一律不算接受，避免被拒绝的 diff 被淘汰后 !finalDiff 误报"写入成功"。
-        const wasAccepted = interruptReason === 'none';
-        const autoSaveError = finalDiff?.autoSaveError;
-
-        // 保存 diff 内容供前端按需加载
-        const diffStorageManager = getDiffStorageManager();
-        let diffContentId: string | undefined;
-        if (diffStorageManager) {
-            try {
-        const diffRef = await diffStorageManager.saveGlobalDiff({
+        // 等待用户处理并统一解析审阅终态（与 write_file/apply_diff/insert_code/replacePass 共用 helper）
+        const outcome = await resolveDiffOutcome({
+            pendingDiffId: pendingDiff.id,
+            abortSignal,
             originalContent,
             newContent,
-            filePath
-        }, undefined, conversationId);
-                diffContentId = diffRef.diffId;
-            } catch (e) {
-                console.warn('Failed to save diff content to storage:', e);
-            }
-        }
+            filePath,
+            actionLabel: 'Delete'
+        });
 
-        if (wasRejected) {
+        if (outcome.wasRejected) {
             // 用户显式拒绝：与取消区分，返回 status:'rejected' + 可读错误
             return {
                 path: filePath,
@@ -230,38 +219,40 @@ async function deleteSingleFile(
                 end_line: endLine,
                 deletedLines: deletedCount,
                 status: 'rejected',
-                error: 'Diff was rejected by user',
-                diffContentId
+                error: outcome.rejectedMessage,
+                diffContentId: outcome.diffContentId,
+                pendingDiffId: outcome.pendingDiffId
             };
         }
 
-        if (wasInterrupted) {
+        if (outcome.wasInterrupted) {
             return {
-           path: filePath,
+                path: filePath,
                 success: false,
                 cancelled: true,
                 start_line: startLine,
                 end_line: endLine,
                 deletedLines: deletedCount,
                 status: 'rejected',
-                error: interruptReason === 'abort'
-                    ? 'Delete was cancelled by user'
-                    : 'Delete was interrupted by user',
-                diffContentId
+                error: outcome.interruptKind === 'abort'
+                    ? outcome.abortMessage
+                    : outcome.interruptMessage,
+                diffContentId: outcome.diffContentId,
+                pendingDiffId: outcome.pendingDiffId
             };
         }
 
         return {
             path: filePath,
-            success: wasAccepted,
+            success: outcome.wasAccepted,
             start_line: startLine,
             end_line: endLine,
             deletedLines: deletedCount,
-            status: wasAccepted ? 'accepted' : 'rejected',
-            error: wasAccepted ? undefined : (autoSaveError || 'Diff was rejected'),
-            autoSaveError,
-            diffContentId,
-            pendingDiffId: pendingDiff.id
+            status: outcome.wasAccepted ? 'accepted' : 'rejected',
+            error: outcome.wasAccepted ? undefined : (outcome.autoSaveError || outcome.rejectedMessage),
+            autoSaveError: outcome.autoSaveError,
+            diffContentId: outcome.diffContentId,
+            pendingDiffId: outcome.pendingDiffId
         };
     } catch (error) {
         return {
@@ -278,15 +269,28 @@ async function deleteSingleFile(
 export function createDeleteCodeTool(): Tool {
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
 
-    const arrayFormatNote = '\n\n**IMPORTANT**: The `files` parameterMUST be an array, even for a single file. Example: `{"files": [{"path": "file.ts", "start_line": 10, "end_line": 20}]}`.';
+    // 修复历史拼写问题：parameterMUST → parameter MUST（中英文同时修复）
+    const arrayFormatNote = isZh
+        ? '\n\n**重要**：`files` 参数必须是数组，即使只删除一个文件。示例：`{"files": [{"path": "file.ts", "start_line": 10, "end_line": 20}]}`。'
+        : '\n\n**IMPORTANT**: The `files` parameter MUST be an array, even for a single file. Example: `{"files": [{"path": "file.ts", "start_line": 10, "end_line": 20}]}`.';
 
-    let description = 'Delete a range of lines (inclusive on both ends) from one or more files. A Diff preview will be shown for user confirmation.' + arrayFormatNote;
-    let pathDescription = 'File path (relative to workspace root)';
+    let description = isZh
+        ? '从一个或多个文件中删除指定行范围（两端都包含）的代码。执行前会展示 Diff 预览并等待用户确认。' + arrayFormatNote
+        : 'Delete a range of lines (inclusive on both ends) from one or more files. A Diff preview will be shown for user confirmation.' + arrayFormatNote;
+    let pathDescription = isZh
+        ? '文件路径（相对于工作区根目录）'
+        : 'File path (relative to workspace root)';
 
     if (isMultiRoot) {
-        description += `\n\nMulti-root workspace: Must use "workspace_name/path" format. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
-        pathDescription = 'File path, must use "workspace_name/path" format';
+        description += isZh
+            ? `\n\n多根工作区：必须使用 "workspace_name/path" 格式。可用工作区：${workspaces.map(w => w.name).join(', ')}`
+            : `\n\nMulti-root workspace: Must use "workspace_name/path" format. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
+        pathDescription = isZh
+            ? '文件路径，必须使用 "workspace_name/path" 格式'
+            : 'File path, must use "workspace_name/path" format';
     }
 
     return {
@@ -307,24 +311,28 @@ export function createDeleteCodeTool(): Tool {
                                     description: pathDescription
                                 },
                                 start_line: {
-                                    type: 'number',
-                         description: 'Start line number (1-based, inclusive)'
+                                    type: 'integer',
+                                    minimum: 1,
+                                    description: isZh ? '起始行号（1-based，包含）' : 'Start line number (1-based, inclusive)'
                                 },
                                 end_line: {
-                                    type: 'number',
-                                    description: 'End line number (1-based, inclusive)'
+                                    type: 'integer',
+                                    minimum: 1,
+                                    description: isZh ? '结束行号（1-based，包含）' : 'End line number (1-based, inclusive)'
                                 }
                             },
                             required: ['path', 'start_line', 'end_line']
                         },
-                        description: 'Array of delete operations. Each element specifies a file and line range to delete. MUST be an array even for a single file.'
+                        description: isZh
+                            ? '删除操作数组。每个元素指定一个文件和要删除的行范围。即使只删除一个文件也必须传数组。'
+                            : 'Array of delete operations. Each element specifies a file and line range to delete. MUST be an array even for a single file.'
                     }
                 },
                 required: ['files']
             }
         },
         handler: async (args, context?: ToolContext): Promise<ToolResult> => {
-            const fileList = args.files as DeleteCodeEntry[] | undefined;
+            const fileList = parseArgs<DeleteCodeArgs>(args).files;
             if (!fileList || !Array.isArray(fileList) || fileList.length === 0) {
                 return { success: false, error: 'files is required and must be a non-empty array' };
             }

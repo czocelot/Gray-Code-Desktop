@@ -477,6 +477,34 @@ describe('决策 6：主历史删除同步软删分支图子树', () => {
         });
     });
 
+    describe('工具拒绝回执同步分支图', () => {
+        test('rejectAllPendingToolCalls 插入 functionResponse 后立即对齐已有分支图', async () => {
+            const ids = await seedConversation('c1', [
+                { role: 'user', parts: [{ text: 'run' }], timestamp: 100 },
+                {
+                    role: 'model',
+                    parts: [{ functionCall: { id: 'call-pending', name: 'write_file', args: {} } }],
+                    timestamp: 200,
+                },
+            ] as ConversationHistory);
+            await repo.save('c1', makeChainGraph([
+                { id: ids[0], role: 'user', activeChildId: ids[1] },
+                { id: ids[1], role: 'model' },
+            ]));
+
+            await manager.rejectAllPendingToolCalls('c1');
+
+            const history = await manager.getMessagesRaw('c1');
+            expect(history.some(message => message.parts?.some(part =>
+                part.functionResponse?.id === 'call-pending'
+            ))).toBe(true);
+            const graph = (await service.getBranchGraph('c1')).graph!;
+            expect(graph.nodes[ids[1]]!.parts.some(part =>
+                part.functionResponse?.id === 'call-pending'
+            )).toBe(true);
+        });
+    });
+
     describe('ConversationManager.deleteMessage 接线', () => {
         test('删除单条消息（非活跃路径节点）后：被删节点及其子树软删，活跃路径不受影响', async () => {
             const ids = await seedConversation('c1');
@@ -570,8 +598,33 @@ describe('决策 6：主历史删除同步软删分支图子树', () => {
             const result = await flowService.handleDeleteToMessage({ conversationId: 'c1', targetIndex: 2 });
 
             expect(result).toEqual({ success: true, deletedCount: 2 });
-            expect(conversationManager.deleteToMessage).toHaveBeenCalledWith('c1', 2);
+            expect(conversationManager.deleteToMessage).toHaveBeenCalledWith(
+                'c1', 2, undefined, { deletedMessageIds: [] }
+            );
             expect(branchService.syncGraphAfterHistoryDelete).not.toHaveBeenCalled();
+        });
+
+        test('manager 内部图同步失败仅告警，不阻断硬删除', async () => {
+            // 决策 6 收敛后：失败容错在 ConversationManager.deleteToMessage 内部（catch + log.warn），
+            // ChatFlowService 只见删除结果，不感知图同步。用 outer 真实 manager/service 验证。
+            const ids = await seedConversation('c1', fourMessageHistory);
+            // 建图后破坏 sidecar：syncGraphAfterHistoryDelete 会抛 BranchError（损坏拒绝覆盖）
+            await repo.save('c1', makeChainGraph([
+                { id: ids[0], role: 'user', activeChildId: ids[1] },
+                { id: ids[1], role: 'model', activeChildId: ids[2] },
+                { id: ids[2], role: 'user', activeChildId: ids[3] },
+                { id: ids[3], role: 'model' },
+            ]));
+            const filePath = repo.getBranchesFilePath('c1');
+            await fsp.mkdir(path.dirname(filePath), { recursive: true });
+            await fsp.writeFile(filePath, '{ broken json', 'utf8');
+
+            const deletedCount = await manager.deleteToMessage('c1', 2);
+
+            // 硬删除成功返回；图同步失败只告警，不阻断
+            expect(deletedCount).toBe(2);
+            const history = await manager.getMessagesRaw('c1');
+            expect(history.map(m => m.id)).toEqual([ids[0], ids[1]]);
         });
 
         test('无全局 BranchService 时不影响原有删除行为', async () => {
@@ -603,7 +656,9 @@ describe('决策 6：主历史删除同步软删分支图子树', () => {
             const result = await flowService.handleDeleteToMessage({ conversationId: 'c1', targetIndex: 0 });
 
             expect(result).toEqual({ success: true, deletedCount: 4 });
-            expect(conversationManager.deleteToMessage).toHaveBeenCalledWith('c1', 0);
+            expect(conversationManager.deleteToMessage).toHaveBeenCalledWith(
+                'c1', 0, undefined, { deletedMessageIds: [] }
+            );
             expect(branchService.syncGraphAfterHistoryDelete).not.toHaveBeenCalled();
         });
     });

@@ -12,6 +12,8 @@ import type {
     SettingsChangeListener
 } from './types';
 import { DEFAULT_GLOBAL_SETTINGS } from './types';
+import { deepEqual } from '../../core/deepEqual';
+import { deepMerge } from '../../core/deepMerge';
 
 /**
  * 合并键黑名单：webview 消息直接透传进 updateSettings（SettingsHandler 无键白名单），
@@ -31,36 +33,22 @@ function isSafeMergeKey(key: string): boolean {
  * 浅合并会让用户手写的部分配置整体替换嵌套默认对象（如只写一个子字段时
  * 其它子字段全部丢失），这里对纯对象逐层合并。
  *
- * 与 core/deepMerge.ts 的 deepMerge 语义差异（保留本地实现、不强制合一的原因）：
- * - 覆盖值为 undefined 时保留目标旧值（对齐 deepMergeConfig 语义：显式 undefined 不应把
- *   顶层键整体置空，如 toolsConfig: undefined 会删掉全部工具配置）；
- * - 覆盖值为 null 时本实现显式写入 null（updateSettings 接收 webview 消息，null 清空字段
- *   语义依赖前者；core.deepMerge 保留目标值）；
- * - 类型冲突（目标非纯对象、源为纯对象）时本实现直接复用源引用；
- *   core.deepMerge 生成源对象副本（getToolsConfigEntry 已用 cloneConfig 兜底拷贝）。
+ * 已收敛为 core/deepMerge.ts 参数化 deepMerge 的薄封装，不再保留本地递归实现。
+ * 对非循环输入与历史本地实现逐字节等价（另额外获得循环引用防护）：
+ * - nullMode: 'write'：覆盖值为 null 时显式写入 null（updateSettings 接收 webview 消息，
+ *   null 清空字段语义依赖此行为；core.deepMerge 默认 'keep' 会保留目标值）；
+ * - conflictMode: 'reuse-source'：类型冲突（目标非纯对象、源为纯对象）时直接复用源引用
+ *   （getToolsConfigEntry 已用 cloneConfig 兜底拷贝）；
+ * - undefinedMode: 'skip'：覆盖值为 undefined 时跳过该键、不创建 own 属性（对齐 deepMergeConfig
+ *   语义），避免 toolsConfig: undefined 等顶层键整体置空删除全部配置。
+ * 原型污染键防护（__proto__/constructor/prototype）与循环引用防护由 core 统一提供。
  */
 export function deepMergeToolsConfig<T extends object>(base: T, override: Partial<T>): T {
-    const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
-    for (const [key, value] of Object.entries(override)) {
-        if (!isSafeMergeKey(key)) {
-            continue;
-        }
-        if (value === undefined) {
-            // 显式 undefined 保留旧值（对齐 deepMergeConfig 语义），
-            // 避免 toolsConfig: undefined 等顶层键整体置空删除全部配置
-            continue;
-        }
-        const baseValue = (base as Record<string, unknown>)[key];
-        if (
-            value !== null && typeof value === 'object' && !Array.isArray(value) &&
-            baseValue !== null && typeof baseValue === 'object' && !Array.isArray(baseValue)
-        ) {
-            out[key] = deepMergeToolsConfig(baseValue as object, value as object);
-        } else {
-            out[key] = value;
-        }
-    }
-    return out as T;
+    return deepMerge(base, override, {
+        nullMode: 'write',
+        conflictMode: 'reuse-source',
+        undefinedMode: 'skip'
+    }) as T;
 }
 
 /**
@@ -278,6 +266,39 @@ export class SettingsCore {
     }
 
     /**
+     * 按需读取指定设置键（轻量快照）。
+     *
+     * 用于请求路径上只读标量字段（checkForUpdates / updateChannel / proxy / storagePath / ui 等）
+     * 的消费点，避免 getSettings() 每次对整个设置树（尤其庞大的 toolsConfig、
+     * toolsEnabled / toolAutoExec 等嵌套对象）做全量深拷贝带来的分配与 GC 压力。
+     *
+     * - 标量字段（number / string / boolean / undefined / null）直接返回原值：标量不可变，
+     *   无需拷贝，也不会暴露活对象引用。
+     * - 对象 / 数组字段仍走 cloneConfig 深拷贝兜底，绝不把存储活对象的引用暴露给调用方。
+     */
+    getScalarSettings<K extends keyof GlobalSettings>(...keys: K[]): Readonly<Pick<GlobalSettings, K>> {
+        const snapshot = {} as Pick<GlobalSettings, K>;
+        for (const key of keys) {
+            const value = this.settings[key];
+            (snapshot as Record<keyof GlobalSettings, unknown>)[key] =
+                value !== null && typeof value === 'object'
+                    ? this.cloneConfig(value)
+                    : value;
+        }
+        return snapshot;
+    }
+
+    /**
+     * 轻量读取更新检查相关设置（checkForUpdates / updateChannel / proxy）。
+     *
+     * 供 UpdateChecker 回调等只读消费点使用：仅构造三个字段的快照，proxy 走 cloneConfig
+     * 深拷贝（proxy 仅含 enabled / url / insecureSkipVerify 三个小字段，拷贝成本远低于整棵树）。
+     */
+    getUpdateSettings(): Readonly<Pick<GlobalSettings, 'checkForUpdates' | 'proxy'>> {
+        return this.getScalarSettings('checkForUpdates', 'proxy');
+    }
+
+    /**
      * 串行执行读-改-写操作
      *
      * 多个主题服务的更新方法（addPinnedFile / setSkillEnabled 等）基于同一旧列表
@@ -318,42 +339,16 @@ export class SettingsCore {
     }
 
     /**
-     * 深度比较两个值是否相等（用于判断 full 事件是否影响 system_prompt 缓存）。
-     * 仅比较可序列化数据（配置对象），不做类型收窄、不处理函数等非常规值。
-     */
-    private static deepEqual(a: unknown, b: unknown): boolean {
-        if (a === b) {
-            return true;
-        }
-        if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
-            return false;
-        }
-        if (Array.isArray(a) !== Array.isArray(b)) {
-            return false;
-        }
-        const aKeys = Object.keys(a as Record<string, unknown>);
-        const bKeys = Object.keys(b as Record<string, unknown>);
-        if (aKeys.length !== bKeys.length) {
-            return false;
-        }
-        return aKeys.every(key =>
-            SettingsCore.deepEqual(
-                (a as Record<string, unknown>)[key],
-                (b as Record<string, unknown>)[key]
-            )
-        );
-    }
-
-    /**
      * 'full' 事件无 path，现有监听器（ChatHandler 的 PromptManager 缓存失效判定）只识别
      * 'tools' 事件，且要求 newValue/oldValue 顶层含 system_prompt——full 事件里
      * system_prompt 嵌套在 toolsConfig 下永远匹配不到。这里在 system_prompt 实际变化时
      * 补发一条 'tools' 事件，让既有监听器无需改动即可使 PromptManager 缓存失效。
+     * 深度比较使用 core/deepEqual（与 VSCodeSettingsStorage.save 的 diff 共用）。
      */
     private notifySystemPromptChangeIfNeeded(oldSettings: GlobalSettings, newSettings: GlobalSettings): void {
         const oldPrompt = oldSettings.toolsConfig?.system_prompt;
         const newPrompt = newSettings.toolsConfig?.system_prompt;
-        if (SettingsCore.deepEqual(oldPrompt, newPrompt)) {
+        if (deepEqual(oldPrompt, newPrompt)) {
             return;
         }
         // 事件负载深拷贝（同 full/tools 事件统一口径）：system_prompt 是存储活对象上的

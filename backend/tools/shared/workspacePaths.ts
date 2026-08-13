@@ -6,6 +6,9 @@ import * as fsSync from 'fs';
 import { t } from '../../i18n';
 import { IS_WINDOWS } from './textUtils';
 
+// TODO(02#05): `(fs as any).realpathSync?.native` 访问 fs 的 native 绑定（@types/node 未声明），
+// 且测试环境可能 mock 掉 realpathSync；保留 as any 并做运行时可选链守卫。
+
 // ==================== 多工作区支持 ====================
 
 /**
@@ -301,9 +304,8 @@ export function toFileUri(pathStr: string): vscode.Uri {
  * 存在祖先的 realpath 后拼接尾部段；解析失败（含测试 mock 掉 fs 时）降级为词法路径。
  * 返回前剥离 Windows 长路径前缀（\\?\ 与 \\?\UNC\），避免同一物理文件出现两种写法。
  *
- * 另：backend/core/fileWriteLockManager 的锁 key 归一化（resolveLockPath，backend/core/ 不在
- * 本目录修改域）目前仍用词法 fsPath；如需让同一物理文件（经符号链接）的不同写法映射到同一锁
- * key，可复用本函数（导出）。
+ * 另：backend/core/fileWriteLockManager 同时保留词法 key 并复用本函数生成物理 key：前者维持
+ * 目录祖先锁语义，后者让同一物理文件（经符号链接）的不同写法互斥。
  */
 export function resolveRealpathForComparison(fsPath: string): string {
     const absolute = path.resolve(fsPath);

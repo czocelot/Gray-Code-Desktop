@@ -22,6 +22,9 @@ import { TaskManager, type TaskEvent } from '../taskManager';
 import { withLinkedAbort } from '../abortLink';
 import { getSharp } from '../../modules/dependencies';
 import { ensureMediaPathsSafe } from './pathGuard';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+import { buildRemoveBackgroundDescriptions } from '../localization/dynamicDescriptions';
 
 /** 抠图任务类型常量 */
 const TASK_TYPE_REMOVE_BG = 'remove_background';
@@ -322,7 +325,7 @@ async function executeRemoveTask(
         }
 
         // 1. 读取原图
-        const imageFile = await readImageFile(image_path, context);
+        const imageFile = await readImageFile(image_path, context, 'remove_background');
         if (!imageFile) {
             return { index, success: false, error: `Task ${index + 1}: Cannot read image: ${image_path}` };
         }
@@ -395,7 +398,7 @@ async function executeRemoveTask(
         if (mask_path) {
             const { uri: maskUri, isOutsideWorkspace: maskOutside } = resolveFileToolPathWithInfo(mask_path, context?.activeWorkspaceUri);
             const maskAccessError = maskOutside
-                ? ensureOutsideWorkspaceAccessApproved('write_file', { path: mask_path }, context)
+                ? ensureOutsideWorkspaceAccessApproved('write_file', { path: mask_path }, context, 'remove_background')
                 : null;
             if (!maskUri || maskAccessError) {
                 // 与 output_path 同语义：写目标无法解析/策略拒绝时显式失败，
@@ -484,7 +487,7 @@ async function executeRemoveTask(
 
         // 工作区外写入：按 write 策略审批（与 write_file 保持一致）
         if (outputOutside) {
-            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context);
+            const writeAccessError = ensureOutsideWorkspaceAccessApproved('write_file', { path: output_path }, context, 'remove_background');
             if (writeAccessError) {
                 return { index, success: false, error: `Task ${index + 1}: ${writeAccessError}` };
             }
@@ -556,28 +559,18 @@ export function createRemoveBackgroundTool(maxBatchTasks: number = 5): Tool {
     const workspaces = getAllWorkspaces();
     const isMultiRoot = workspaces.length > 1;
 
-    let description = `Remove background from images, generating transparent PNG. Supports single and batch modes.
+    // 语言感知说明：根据当前实际界面语言（zh-CN/en/ja）生成模型可见说明。
+    // 顶层说明（Limits、单张/批量模式、多根尾巴）与参数说明统一由
+    // localization/dynamicDescriptions 的语言感知生成器负责。
+    const lang = resolveLocalizationLanguage(getActualLanguage());
+    const descriptions = buildRemoveBackgroundDescriptions({
+        lang,
+        maxBatchTasks,
+        isMultiRoot,
+        workspaceNames: workspaces.map(w => w.name)
+    });
 
-**Limits**:
-- Maximum ${maxBatchTasks} background removal tasks per call
-
-**Single Mode**: Use image_path + output_path parameters
-**Batch Mode**: Use images array parameter (max ${maxBatchTasks} tasks)
-
-**How it works**:
-1. Uses AI to generate a mask (subject=black, background=white)
-2. Sets background to transparent based on the mask
-3. Saves as transparent PNG
-
-**Use cases**:
-- Product image background removal
-- Portrait cutout
-- Object extraction
-- Creative composite material preparation`;
-
-    if (isMultiRoot) {
-        description += `\n\n**Multi-root Workspace**: Use "workspace_name/path" format for paths. Available workspaces: ${workspaces.map(w => w.name).join(', ')}`;
-    }
+    const description = descriptions.description;
 
     return {
         declaration: {
@@ -591,25 +584,25 @@ export function createRemoveBackgroundTool(maxBatchTasks: number = 5): Tool {
                     // 批量模式参数
                     images: {
                         type: 'array',
-                        description: 'Batch mode: Background removal task array. Each task can independently configure input, output, and subject description. MUST be an array even for single task.',
+                        description: descriptions.images,
                         items: {
                             type: 'object',
                             properties: {
                                 image_path: {
                                     type: 'string',
-                                    description: 'Source image path (required)'
+                                    description: descriptions.batchImagePath
                                 },
                                 output_path: {
                                     type: 'string',
-                                    description: 'Output file path (required). Recommend using .png extension.'
+                                    description: descriptions.batchOutputPath
                                 },
                                 subject_description: {
                                     type: 'string',
-                                    description: 'Subject description (optional). Helps AI identify the subject to keep more accurately.'
+                                    description: descriptions.batchSubjectDescription
                                 },
                                 mask_path: {
                                     type: 'string',
-                                    description: 'Mask image save path (optional). If provided, also saves the mask image.'
+                                    description: descriptions.batchMaskPath
                                 }
                             },
                             required: ['image_path', 'output_path']
@@ -618,25 +611,19 @@ export function createRemoveBackgroundTool(maxBatchTasks: number = 5): Tool {
                     // 单张模式参数（向后兼容）
                     image_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Source image path (required). Use "workspace_name/path" format.'
-                            : 'Single mode: Source image path (required). Relative to workspace.'
+                        description: descriptions.singleImagePath
                     },
                     output_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Output file path (required). Recommend using .png extension. Use "workspace_name/path" format.'
-                            : 'Single mode: Output file path (required). Recommend using .png extension.'
+                        description: descriptions.singleOutputPath
                     },
                     subject_description: {
                         type: 'string',
-                        description: 'Single mode: Subject description (optional). Helps AI identify the subject to keep more accurately. E.g., "person", "product", "cat".'
+                        description: descriptions.singleSubjectDescription
                     },
                     mask_path: {
                         type: 'string',
-                        description: isMultiRoot
-                            ? 'Single mode: Mask image save path (optional). If provided, also saves the mask image. Use "workspace_name/path" format.'
-                            : 'Single mode: Mask image save path (optional). If provided, also saves the mask image.'
+                        description: descriptions.singleMaskPath
                     }
                 }
             }

@@ -15,8 +15,15 @@ import type { SubAgentRunStatus } from './runEventBus';
 import { getGlobalToolRegistry, getGlobalMcpManager, getGlobalSettingsManager, getGlobalConfigManager } from '../../core/settingsContext';
 import { encodeMcpToolName } from '../../modules/mcp/mcpToolNameCodec';
 import { TaskManager } from '../taskManager';
+import { bindBackgroundSubAgentTask, unbindBackgroundSubAgentTask } from './detachedTaskBridge';
 import { MEMORY_TOOL_NAMES } from '../memory';
 import { TODO_TOOL_NAMES } from '../todo';
+import { getActualLanguage } from '../../i18n';
+import { resolveLocalizationLanguage } from '../localization/types';
+
+// TODO(02#05): 本文件保留了少量 `as any`（context.conversationStore / context.promptModeSnapshot）——
+// 运行时对象是 ConversationManager / ResolvedPromptModeSnapshot，而 ToolContext 只为元数据接口
+// 声明了窄类型；为不引入跨模块类型耦合，此处暂以 as any 透传，待 ToolContext 字段类型补齐后再收紧。
 
 // 修改原因：todo_write/todo_update 依赖主会话 conversationId，子代理执行路径无法使用，
 // 不应出现在子代理的工具描述/声明里（P1：避免子代理反复尝试调用报错浪费迭代）。
@@ -40,7 +47,7 @@ const SUBAGENT_EXCLUDED_TOOL_NAMES = new Set<string>([...MEMORY_TOOL_NAMES, ...T
  */
 let toolNameSnapshotCache: { key: string; builtin: string[]; mcp: string[] } | null = null;
 
-function getCachedToolNameSnapshot(): { builtin: string[]; mcp: string[] } {
+function getCachedToolNameSnapshot(): { key: string; builtin: string[]; mcp: string[] } {
     const toolRegistry = getGlobalToolRegistry();
     const mcpManager = getGlobalMcpManager();
 
@@ -160,11 +167,11 @@ function getAgentAvailableTools(config: SubAgentConfig): string[] {
 }
 
 /**
- * 格式化工具列表为简洁的字符串
+ * 格式化工具列表为简洁的字符串（isZh 控制 'None'/'... more' 的本地化）
  */
-function formatToolsList(tools: string[], maxDisplay: number = 10): string {
+function formatToolsList(tools: string[], maxDisplay: number = 10, isZh: boolean = false): string {
     if (tools.length === 0) {
-        return 'None';
+        return isZh ? '无' : 'None';
     }
     
     if (tools.length <= maxDisplay) {
@@ -172,7 +179,9 @@ function formatToolsList(tools: string[], maxDisplay: number = 10): string {
     }
     
     const displayTools = tools.slice(0, maxDisplay);
-    return `${displayTools.join(', ')} ... and ${tools.length - maxDisplay} more`;
+    return isZh
+        ? `${displayTools.join(', ')} ... 等 ${tools.length - maxDisplay} 个更多`
+        : `${displayTools.join(', ')} ... and ${tools.length - maxDisplay} more`;
 }
 
 /**
@@ -214,34 +223,40 @@ export function hasAvailableSubAgent(): boolean {
 }
 
 /**
- * 格式化限制数值（-1 表示无限制）
+ * 格式化限制数值（-1 表示无限制；isZh 控制 'unlimited' 的本地化）
  */
-function formatLimit(value: number | undefined, defaultValue: number): string {
+function formatLimit(value: number | undefined, defaultValue: number, isZh: boolean): string {
     const v = value ?? defaultValue;
-    return v === -1 ? 'unlimited' : String(v);
+    return v === -1 ? (isZh ? '无限制' : 'unlimited') : String(v);
 }
 
 /**
  * 生成 agentName 参数的描述（包含各子代理的描述、可用工具和限制）
  */
-function generateAgentNameDescription(): string {
+function buildAgentNameDescription(): string {
     const configs = subAgentRegistry.getAllConfigs();
     const settings = getSubAgentsSettings();
     const hasGeneralWorker = settings.generalWorkerEnabled !== false;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
 
     if (configs.length === 0 && !hasGeneralWorker) {
-        return 'The name of sub-agent to invoke. Currently no sub-agents available.';
+        return isZh
+            ? '要调用的子代理名称。当前没有可用的子代理。'
+            : 'The name of sub-agent to invoke. Currently no sub-agents available.';
     }
 
     const entries: string[] = [];
 
-    // 静态注册的子代理
+    // 静态注册的子代理（代理名称/描述属于外部内容，原样保留）
     for (const config of configs) {
         const tools = getAgentAvailableTools(config);
-        const toolsStr = formatToolsList(tools, 8);
-        const maxIterStr = formatLimit(config.maxIterations, getGlobalDefaultMaxIterations());
-        const maxRuntimeStr = formatLimit(config.maxRuntime, getGlobalDefaultMaxRuntime());
-        entries.push(`  - "${config.name}": ${config.description || 'No description'}\n    Tools (${tools.length}): ${toolsStr}\n    Limits: max ${maxIterStr} iterations, max ${maxRuntimeStr}s runtime`);
+        const toolsStr = formatToolsList(tools, 8, isZh);
+        const maxIterStr = formatLimit(config.maxIterations, getGlobalDefaultMaxIterations(), isZh);
+        const maxRuntimeStr = formatLimit(config.maxRuntime, getGlobalDefaultMaxRuntime(), isZh);
+        entries.push(isZh
+            ? `  - "${config.name}"：${config.description || '无描述'}\n    工具（${tools.length} 个）：${toolsStr}\n    限制：最多 ${maxIterStr} 次迭代，最多 ${maxRuntimeStr} 秒运行时间`
+            : `  - "${config.name}": ${config.description || 'No description'}\n    Tools (${tools.length}): ${toolsStr}\n    Limits: max ${maxIterStr} iterations, max ${maxRuntimeStr}s runtime`);
     }
 
     // 动态 General Worker（启用时追加）
@@ -249,35 +264,62 @@ function generateAgentNameDescription(): string {
         // 与 getAgentAvailableTools 共用同一份工具名快照缓存，不再重复枚举 registry/MCP
         const { builtin: builtinToolNames, mcp: mcpToolNames } = getCachedToolNameSnapshot();
         const allTools = [...builtinToolNames, ...mcpToolNames];
-        const toolsStr = formatToolsList(allTools, 8);
+        const toolsStr = formatToolsList(allTools, 8, isZh);
         const globalMaxIterations = getGlobalDefaultMaxIterations();
-        entries.push(`  - "${GENERAL_WORKER_NAME}": Zero-config general-purpose worker that inherits the current session's channel and all available non-memory tool permissions; when invoked from another sub-agent its tools are limited to the dispatching agent's own tool set\n    Tools (${allTools.length}): ${toolsStr}\n    Limits: max ${globalMaxIterations} iterations, max ${DEFAULT_MAX_RUNTIME_S}s runtime`);
+        entries.push(isZh
+            ? `  - "${GENERAL_WORKER_NAME}"：零配置的通用型工作代理，继承当前会话的通道和所有可用的非 memory 工具权限；当从另一个子代理调用时，其工具被限制为派发代理自身的工具集\n    工具（${allTools.length} 个）：${toolsStr}\n    限制：最多 ${globalMaxIterations} 次迭代，最多 ${DEFAULT_MAX_RUNTIME_S} 秒运行时间`
+            : `  - "${GENERAL_WORKER_NAME}": Zero-config general-purpose worker that inherits the current session's channel and all available non-memory tool permissions; when invoked from another sub-agent its tools are limited to the dispatching agent's own tool set\n    Tools (${allTools.length}): ${toolsStr}\n    Limits: max ${globalMaxIterations} iterations, max ${DEFAULT_MAX_RUNTIME_S}s runtime`);
     }
 
-    return `The name of sub-agent to invoke. Available options:\n${entries.join('\n')}`;
+    return isZh
+        ? `要调用的子代理名称。可用选项：\n${entries.join('\n')}`
+        : `The name of sub-agent to invoke. Available options:\n${entries.join('\n')}`;
 }
 
 /**
  * 生成工具的主描述
  */
-function generateToolDescription(): string {
+function buildToolDescription(): string {
     const configs = subAgentRegistry.getAllConfigs();
     const settings = getSubAgentsSettings();
     const hasGeneralWorker = settings.generalWorkerEnabled !== false;
     const maxConcurrent = settings.maxConcurrentAgents ?? 3;
-    const maxConcurrentStr = formatLimit(maxConcurrent, 3);
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
+    const maxConcurrentStr = formatLimit(maxConcurrent, 3, isZh);
 
     if (configs.length === 0 && !hasGeneralWorker) {
-        return `Invoke a specialized sub-agent to handle a specific task.
+        return isZh
+            ? `调用专门的子代理来处理特定任务。
+
+**注意：** 当前未配置任何子代理。请先在设置中配置子代理。`
+            : `Invoke a specialized sub-agent to handle a specific task.
 
 **Note:** No sub-agents are currently configured. Please configure sub-agents in settings first.`;
     }
 
     const limitsSection = maxConcurrent === -1
-        ? '- Each sub-agent has its own max iterations limit (see agent descriptions)'
-        : `- Maximum ${maxConcurrentStr} sub-agent(s) can be invoked in a single response\n- Each sub-agent has its own max iterations limit (see agent descriptions)`;
+        ? (isZh
+            ? '- 每个子代理有自己的最大迭代限制（见代理描述）'
+            : '- Each sub-agent has its own max iterations limit (see agent descriptions)')
+        : (isZh
+            ? `- 单次回复最多可调用 ${maxConcurrentStr} 个子代理\n- 每个子代理有自己的最大迭代限制（见代理描述）`
+            : `- Maximum ${maxConcurrentStr} sub-agent(s) can be invoked in a single response\n- Each sub-agent has its own max iterations limit (see agent descriptions)`);
 
-    return `Invoke a specialized sub-agent to handle a specific task. The sub-agent has its own tools and can perform complex operations autonomously.
+    return isZh
+        ? `调用专门的子代理来处理特定任务。子代理有自己的工具，可以自主执行复杂操作。
+
+**限制：**
+${limitsSection}
+
+**使用说明：**
+- 根据任务选择合适的代理
+- 为子代理提供清晰详细的提示词
+- 子代理将执行任务并返回结果
+- 子代理有自己的工具访问权限，可以多次调用工具
+- 使用子代理处理需要集中注意力的复杂多步任务
+- 对于长时间运行的任务（批量审查/研究），传 \`background: true\` 以非阻塞方式启动子代理：工具立即返回 taskId，最终结果稍后以 [Background task completed] 消息到达。不要等待或轮询它。后台任务即使当前流停止也会继续运行——请通过后台任务栏显式取消它们。`
+        : `Invoke a specialized sub-agent to handle a specific task. The sub-agent has its own tools and can perform complex operations autonomously.
 
 **Limits:**
 ${limitsSection}
@@ -292,12 +334,77 @@ ${limitsSection}
 }
 
 /**
+ * 声明描述缓存（性能优化）：此前 generateAgentNameDescription / generateToolDescription
+ * 每次 getter 访问都会全量拼接所有代理的长描述；getAllDeclarations/getAvailableDeclarations
+ * 一次请求遍历全部工具时会反复触发，同一份描述被重建几十次。
+ *
+ * 缓存键 = 语言 + 关键输入指纹：
+ * - agentName 描述：语言、启用代理列表（名称/描述/迭代上限/运行上限/工具配置）、
+ *   工具名快照版本、generalWorkerEnabled、全局默认迭代/运行上限；
+ * - tool 描述：语言、启用代理数量、generalWorkerEnabled、maxConcurrentAgents。
+ * 任一输入变化即失效重建；工具名快照沿用 toolNameSnapshotCache 的失效边界。
+ */
+let agentNameDescriptionCache: { key: string; value: string } | null = null;
+let toolDescriptionCache: { key: string; value: string } | null = null;
+
+function generateAgentNameDescription(): string {
+    const configs = subAgentRegistry.getAllConfigs();
+    const settings = getSubAgentsSettings();
+    const hasGeneralWorker = settings.generalWorkerEnabled !== false;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
+    const cacheKey = JSON.stringify([
+        isZh,
+        configs.map(config => ({
+            name: config.name,
+            description: config.description,
+            maxIterations: config.maxIterations,
+            maxRuntime: config.maxRuntime,
+            tools: {
+                mode: config.tools.mode,
+                whitelist: config.tools.whitelist,
+                blacklist: config.tools.blacklist,
+                list: config.tools.list
+            }
+        })),
+        getCachedToolNameSnapshot().key,
+        hasGeneralWorker,
+        getGlobalDefaultMaxIterations(),
+        getGlobalDefaultMaxRuntime()
+    ]);
+    if (agentNameDescriptionCache && agentNameDescriptionCache.key === cacheKey) {
+        return agentNameDescriptionCache.value;
+    }
+    const value = buildAgentNameDescription();
+    agentNameDescriptionCache = { key: cacheKey, value };
+    return value;
+}
+
+function generateToolDescription(): string {
+    const configs = subAgentRegistry.getAllConfigs();
+    const settings = getSubAgentsSettings();
+    const hasGeneralWorker = settings.generalWorkerEnabled !== false;
+    const maxConcurrent = settings.maxConcurrentAgents ?? 3;
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
+    const cacheKey = JSON.stringify([isZh, configs.length, hasGeneralWorker, maxConcurrent]);
+    if (toolDescriptionCache && toolDescriptionCache.key === cacheKey) {
+        return toolDescriptionCache.value;
+    }
+    const value = buildToolDescription();
+    toolDescriptionCache = { key: cacheKey, value };
+    return value;
+}
+
+/**
  * 动态获取工具声明
  * 
  * 每次调用时根据当前注册的子代理生成最新的工具定义
  */
 export function getSubAgentsToolDeclaration(): ToolDeclaration {
     const agentNames = getAvailableAgentNames();
+    // 模型声明语言：zh-CN → 中文，en/ja → 英文（ja 本阶段映射到英文说明）
+    const isZh = resolveLocalizationLanguage(getActualLanguage()) === 'zh-CN';
     
     return {
         name: 'subagents',
@@ -313,19 +420,27 @@ export function getSubAgentsToolDeclaration(): ToolDeclaration {
                 },
                 prompt: {
                     type: 'string',
-                    description: 'The task prompt/instruction for the sub-agent. Be specific and detailed about what you want the sub-agent to accomplish.'
+                    description: isZh
+                        ? '给子代理的任务提示词/指令。要具体、详细地说明你希望子代理完成什么。'
+                        : 'The task prompt/instruction for the sub-agent. Be specific and detailed about what you want the sub-agent to accomplish.'
                 },
                 context: {
                     type: 'string',
-                    description: 'Optional additional context or background information for the sub-agent. Include relevant file paths, code snippets, or requirements.'
+                    description: isZh
+                        ? '给子代理的可选附加上下文或背景信息。包含相关文件路径、代码片段或需求。'
+                        : 'Optional additional context or background information for the sub-agent. Include relevant file paths, code snippets, or requirements.'
                 },
                 continueFromRunId: {
                     type: 'string',
-                    description: 'Optional completed Sub-Agent run ID to continue from. The new run inherits that run\'s complete transcript. Running or unknown run IDs are rejected.'
+                    description: isZh
+                        ? '可选的已完成子代理运行 ID，用于继续该运行。新运行继承该运行的完整记录。正在运行或未知的运行 ID 会被拒绝。'
+                        : 'Optional completed Sub-Agent run ID to continue from. The new run inherits that run\'s complete transcript. Running or unknown run IDs are rejected.'
                 },
                 background: {
                     type: 'boolean',
-                    description: 'Set to true to start the sub-agent in the background (non-blocking). Use ONLY for long-running tasks (e.g. batch review/research). The tool returns immediately with a taskId; the final result will arrive later as a "[Background task completed]" user message — do NOT wait for it or poll. Background tasks are NOT cancelled when the current stream stops; cancel them explicitly via the background task bar.'
+                    description: isZh
+                        ? '设为 true 以在后台启动子代理（非阻塞）。仅用于长时间运行的任务（例如批量审查/研究）。工具立即返回 taskId；最终结果稍后以 "[Background task completed]" 用户消息到达——不要等待或轮询它。后台任务不会因当前流停止而取消；请通过后台任务栏显式取消。'
+                        : 'Set to true to start the sub-agent in the background (non-blocking). Use ONLY for long-running tasks (e.g. batch review/research). The tool returns immediately with a taskId; the final result will arrive later as a "[Background task completed]" user message — do NOT wait for it or poll. Background tasks are NOT cancelled when the current stream stops; cancel them explicitly via the background task bar.'
                 }
             },
             required: ['agentName', 'prompt']
@@ -595,6 +710,12 @@ async function executeSubAgent(
             continueFromRunId,
             promptPreview: prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt
         });
+        bindBackgroundSubAgentTask({
+            runId: effectiveRunId,
+            taskId,
+            conversationId,
+            agentName
+        });
 
         // 把同步抛错也纳入 Promise 链（runtimeExecutor 若同步 throw，then/catch 无法捕获，
         // registerTask 已登记的任务会永远残留 running）；Promise.resolve().then 保证
@@ -616,10 +737,15 @@ async function executeSubAgent(
             // H-1：把 run 的工具白名单向下传给 executor（父 run 白名单 = 白名单 ∩ 白名单）
             inheritedToolFilter: inheritedToolFilterList
         }, backgroundAbortController.signal)).then(result => {
+            // 自定义 executor 可能不发 run 终态事件：Promise settle 作为兜底。
+            // 默认 executor 已由 detachedTaskBridge 在 run 终态事件时注销，
+            // 此时 unregisterTask 对已移除任务是安全 no-op。
+            unbindBackgroundSubAgentTask(effectiveRunId, taskId);
             const status = result.cancelled ? 'cancelled' : (result.success ? 'completed' : 'error');
             TaskManager.unregisterTask(taskId, status, {
                 runId: result.runId,
                 agentName,
+                conversationId,
                 response: result.response,
                 steps: result.steps,
                 // 与前台 L622 同口径：子代理实际调用的工具名列表（空数组 = 未调用任何工具）
@@ -627,9 +753,11 @@ async function executeSubAgent(
                 ...(result.error ? { error: result.error } : {})
             });
         }).catch(error => {
+            unbindBackgroundSubAgentTask(effectiveRunId, taskId);
             TaskManager.unregisterTask(taskId, 'error', {
                 runId: effectiveRunId,
                 agentName,
+                conversationId,
                 error: error instanceof Error ? error.message : String(error)
             });
         });
@@ -763,22 +891,11 @@ export function getSubAgentsTool(): Tool {
 }
 
 /**
- * 强制刷新工具定义
- * 
- * 当子代理配置发生变化时调用，确保下次获取工具定义时是最新的
- * 注意：由于使用了 getter，实际上不需要手动刷新，但保留此方法以备将来使用
+ * 强制刷新工具定义（纯 no-op，保留兼容）
+ *
+ * subagent 工具声明是 getter 每次访问重算（见 createSubAgentsTool 的 declaration getter），
+ * 刷新无需动作；保留此函数仅为兼容既有调用方（webview 层仍会调用它）。
  */
 export function refreshSubAgentsTool(): void {
-    // 使用 getter 后，每次访问 declaration 都会重新生成
-    // 这里不需要做任何事情，但保留接口以保持向后兼容
-    console.log('[SubAgents] Tool declaration will be refreshed on next access');
-}
-
-/**
- * 注册 SubAgents 工具
- * 
- * @deprecated 使用 getSubAgentsTool() 代替
- */
-export function registerSubAgents(): Tool {
-    return getSubAgentsTool();
+    // 纯 no-op：声明 getter 每次访问重算，刷新无需任何动作；保留此函数仅为兼容调用方。
 }

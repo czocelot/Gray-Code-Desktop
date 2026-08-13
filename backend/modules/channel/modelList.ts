@@ -46,6 +46,19 @@ function touchModelListCache(key: string): void {
   }
 }
 
+/**
+ * 读取「是否使用 Authorization Bearer 发送 API Key」这一可选公共字段。
+ *
+ * 该字段仅 Gemini / Anthropic 渠道声明（OpenAI / OpenAI-Responses 无此语义），
+ * 在 ChannelConfig 联合类型上直接访问会报错；按 discriminant 收窄后读取。
+ * 非 Gemini/Anthropic 渠道返回 undefined，与历史 `as any` 转型访问时的运行时行为完全一致。
+ */
+function getUseAuthorizationHeader(config: ChannelConfig): boolean | undefined {
+  return config.type === 'gemini' || config.type === 'anthropic'
+    ? config.useAuthorizationHeader
+    : undefined;
+}
+
 function buildModelListCacheKey(type: string, url: string, config: ChannelConfig, proxyUrl?: string): string {
   const cfg = config as any;
   const customHeaders = cfg.customHeadersEnabled ? JSON.stringify(cfg.customHeaders ?? '') : '';
@@ -173,8 +186,9 @@ async function fetchAllPages<T>(
  * Gemini API 支持 pageSize 和 pageToken 分页参数
  */
 export async function getGeminiModels(config: ChannelConfig, proxyUrl?: string): Promise<ModelInfo[]> {
-  const apiKey = (config as any).apiKey;
-  const url = (config as any).url || 'https://generativelanguage.googleapis.com/v1beta';
+  const apiKey = config.apiKey;
+  const url = config.url || 'https://generativelanguage.googleapis.com/v1beta';
+  const useAuthorizationHeader = getUseAuthorizationHeader(config);
 
   if (!apiKey) {
     throw new Error(t('modules.channel.modelList.errors.apiKeyRequired'));
@@ -198,8 +212,8 @@ export async function getGeminiModels(config: ChannelConfig, proxyUrl?: string):
         }
 
         const headers: Record<string, string> = {};
-        // 使用 useAuthorizationHeader 时，使用 Authorization Bearer 方式
-        if ((config as any).useAuthorizationHeader) {
+        // 启用 useAuthorizationHeader 时，使用 Authorization Bearer 格式
+        if (useAuthorizationHeader) {
           headers['Authorization'] = `Bearer ${apiKey}`;
         } else {
           // 始终通过 header 传递密钥（x-goog-api-key），不允许 apiKey 在 URL query 中出现，
@@ -248,8 +262,8 @@ export async function getGeminiModels(config: ChannelConfig, proxyUrl?: string):
  * 通过传递较大的 limit 参数并支持分页遍历来获取所有模型
  */
 export async function getOpenAIModels(config: ChannelConfig, proxyUrl?: string): Promise<ModelInfo[]> {
-  const apiKey = (config as any).apiKey;
-  let url = (config as any).url || 'https://api.openai.com/v1';
+  const apiKey = config.apiKey;
+  let url = config.url || 'https://api.openai.com/v1';
 
   if (url.endsWith('/')) {
     url = url.slice(0, -1);
@@ -330,8 +344,9 @@ export async function getOpenAIModels(config: ChannelConfig, proxyUrl?: string):
  * Anthropic Models API 默认 limit=20，最大 limit=1000，支持分页游标
  */
 export async function getClaudeModels(config: ChannelConfig, proxyUrl?: string): Promise<ModelInfo[]> {
-  const apiKey = (config as any).apiKey;
-  const baseUrl = normalizeAnthropicModelsBaseUrl((config as any).url);
+  const apiKey = config.apiKey;
+  const baseUrl = normalizeAnthropicModelsBaseUrl(config.url);
+  const useAuthorizationHeader = getUseAuthorizationHeader(config);
 
   if (!apiKey) {
     throw new Error(t('modules.channel.modelList.errors.apiKeyRequired'));
@@ -358,7 +373,7 @@ export async function getClaudeModels(config: ChannelConfig, proxyUrl?: string):
           'anthropic-version': '2023-06-01'
         };
         // 根据 useAuthorizationHeader 选项决定认证方式
-        if ((config as any).useAuthorizationHeader) {
+        if (useAuthorizationHeader) {
           headers['Authorization'] = `Bearer ${apiKey}`;
         } else {
           headers['x-api-key'] = apiKey;
@@ -411,6 +426,7 @@ export async function getClaudeModels(config: ChannelConfig, proxyUrl?: string):
  * 根据配置类型获取模型列表
  */
 export async function getModels(config: ChannelConfig, proxyUrl?: string): Promise<ModelInfo[]> {
+  const configType = config.type;
   switch (config.type) {
     case 'gemini':
       return getGeminiModels(config, proxyUrl);
@@ -425,6 +441,6 @@ export async function getModels(config: ChannelConfig, proxyUrl?: string): Promi
       return getClaudeModels(config, proxyUrl);
     
     default:
-      throw new Error(t('modules.channel.modelList.errors.unsupportedConfigType', { type: (config as any).type }));
+      throw new Error(t('modules.channel.modelList.errors.unsupportedConfigType', { type: configType }));
   }
 }

@@ -18,6 +18,7 @@ import {
   getToolDescription as getToolDescriptionLocalized
 } from '@/utils/toolLocalization'
 import { decodeMcpToolName } from '@/utils/tools/mcp/mcpToolNameCodec'
+import { groupToolsByCategory, getCategoryName, getCategoryIcon } from '@/utils/toolCategory'
 
 // 工具信息接口
 interface ToolInfo {
@@ -96,49 +97,8 @@ async function toggleDiffAutoApprove(autoApprove: boolean) {
   }
 }
 
-// 按分类分组的工具
-const toolsByCategory = computed(() => {
-  const grouped: Record<string, ToolInfo[]> = {}
-  
-  for (const tool of tools.value) {
-    const category = tool.category || '其他'
-    if (!grouped[category]) {
-      grouped[category] = []
-    }
-    grouped[category].push(tool)
-  }
-  
-  return grouped
-})
-
-// 获取分类显示名称
-function getCategoryDisplayName(category: string): string {
-  const key = `components.settings.autoExec.categories.${category}` as const
-  return t(key)
-}
-
-// 分类图标映射
-const categoryIcons: Record<string, string> = {
-  'file': 'codicon-file',
-  'search': 'codicon-search',
-  'terminal': 'codicon-terminal',
-  'lsp': 'codicon-symbol-class',
-  'media': 'codicon-file-media',
-  'plan': 'codicon-notebook',
-  'mcp': 'codicon-plug',
-  'todo': 'codicon-checklist',
-  'history': 'codicon-history',
-  'memory': 'codicon-database',
-  'review': 'codicon-eye',
-  'progress': 'codicon-graph-line',
-  'skills': 'codicon-lightbulb',
-  'design': 'codicon-paintcan',
-  'notification': 'codicon-bell',
-  'agents': 'codicon-account',
-  'sandbox': 'codicon-terminal',
-  '其他': 'codicon-extensions',
-  'other': 'codicon-extensions'
-}
+// 按分类分组的工具（复用 utils/toolCategory 的归一化逻辑：未知/缺省分类归入 other）
+const toolsByCategory = computed(() => groupToolsByCategory(tools.value))
 
 // 加载工具列表和配置
 async function loadData() {
@@ -248,11 +208,6 @@ function getToolDescription(tool: ToolInfo): string {
   return getToolDescriptionLocalized(tool.name, tool.description)
 }
 
-// 获取分类图标
-function getCategoryIcon(category: string): string {
-  return categoryIcons[category] || 'codicon-extensions'
-}
-
 // 检查工具是否是危险工具（默认需要确认）
 function isDangerousTool(toolName: string): boolean {
   const dangerousTools = ['delete_file', 'execute_command', 'create_plan']
@@ -328,7 +283,7 @@ onMounted(() => {
         <div class="category-header" :class="{ collapsed: isCategoryCollapsed(category) }" @click="toggleCategory(category)">
           <i :class="['codicon', isCategoryCollapsed(category) ? 'codicon-chevron-right' : 'codicon-chevron-down']"></i>
           <i :class="['codicon', getCategoryIcon(category)]"></i>
-          <span>{{ getCategoryDisplayName(category) }}</span>
+          <span>{{ getCategoryName(category) }}</span>
           <span class="category-count">{{ categoryTools.length }}</span>
         </div>
         

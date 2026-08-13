@@ -9,6 +9,13 @@
  * - 主循环核心（executeFunctionCallsWithProgressCore：并行分组 / abort 竞速 / 检查点 / 多模态汇聚）
  * - 类型（ToolExecutionProgressEvent / ToolExecutionFullResult）与并行组收尾窗口常量/工具函数
  *
+ * checkpointMode 参数（流式早启动批次检查点合并）：
+ * - 'auto'（默认）：本批次自行创建 before/after 检查点（工具执行核心既有语义）。
+ * - 'skip'：跳过本批次内部检查点创建，由调用方（ToolIterationLoopService 流式路径）按
+ *   「一次模型回复 = 一个工具批次」统一创建一组 before/after——早启动路径对每个工具单独
+ *   调用本方法，若各自建检查点会产生 N 组物理存档；合并后仅一组（tool_batch）。
+ *   非流式主循环 / subagent 等调用点不传该参数，保持既有行为零变化。
+ *
  * 逻辑与拆分前逐字一致；仅可见性从 private 调整为 protected（跨继承类调用所需，
  * 编译期属性，零运行时影响），以及 UNBOUND_WARNED_MAX 的引用限定符改为本类名
  * （避免壳文件循环依赖，值不变）。
@@ -26,6 +33,7 @@ import type { LockHolder } from '../../../../../core/fileWriteLockManager';
 import { isDiffReviewToolCall } from '../diffReviewTools';
 import { MAIN_LOOP_ABORT_DRAIN_GRACE_MS, drainToolExecutionGeneratorAfterAbort, raceWithTimeout } from '../abortDrain';
 import { cloneToolResponse, ResultCore } from './result';
+import { extractAffectedPaths, workspaceUriToFsPath } from '../../../../checkpoint/affectedPaths';
 
 /**
  * 工具执行完整结果
@@ -128,6 +136,7 @@ export class ExecutionCore extends ResultCore {
      * @param messageIndex 消息索引（用于创建检查点）
      * @param config 渠道配置（用于获取多模态工具设置和工具模式）
      * @param abortSignal 取消信号（用于中断工具执行）
+     * @param checkpointMode 'skip' 时本批次不创建检查点（由调用方统一创建，见文件头说明）
      * @returns 完整执行结果
      */
     async executeFunctionCallsWithResults(
@@ -144,7 +153,8 @@ export class ExecutionCore extends ResultCore {
         mailboxRunId?: string,
         nestingDepth?: number,
         activeWorkspaceUri?: string,
-        modelOverride?: string
+        modelOverride?: string,
+        checkpointMode?: 'auto' | 'skip'
     ): Promise<ToolExecutionFullResult> {
         const generator = this.executeFunctionCallsWithProgress(
             calls,
@@ -160,7 +170,8 @@ export class ExecutionCore extends ResultCore {
             mailboxRunId,
             nestingDepth,
             activeWorkspaceUri,
-            modelOverride
+            modelOverride,
+            checkpointMode
         );
 
         // abort-race（复用 ToolIterationLoopService 主循环 1433-1503 的模式）：
@@ -281,7 +292,8 @@ export class ExecutionCore extends ResultCore {
         mailboxRunId?: string,
         nestingDepth?: number,
         activeWorkspaceUri?: string,
-        modelOverride?: string
+        modelOverride?: string,
+        checkpointMode?: 'auto' | 'skip'
     ): AsyncGenerator<ToolExecutionProgressEvent, ToolExecutionFullResult, void> {
         // MED-1：领取 drain epoch——最新启动的执行循环持有 (conversationId, runId) 的 drain 权
         const mailboxDrain = this.claimMailboxDrainEpoch(mailboxConversationId, mailboxRunId);
@@ -301,7 +313,8 @@ export class ExecutionCore extends ResultCore {
                 nestingDepth,
                 mailboxDrain,
                 activeWorkspaceUri,
-                modelOverride
+                modelOverride,
+                checkpointMode
             );
         } finally {
             // E-2：生成器异常/被提前 return() 时兜底释放（正常完成路径由核心 return 后同样
@@ -333,7 +346,8 @@ export class ExecutionCore extends ResultCore {
         nestingDepth?: number,
         mailboxDrain?: { key: string; epoch: number },
         activeWorkspaceUri?: string,
-        modelOverride?: string
+        modelOverride?: string,
+        checkpointMode?: 'auto' | 'skip'
     ): AsyncGenerator<ToolExecutionProgressEvent, ToolExecutionFullResult, void> {
         const approvedToolCallIds = executionOptions instanceof Set ? executionOptions : undefined;
         const resolvedProgressEmitter = typeof executionOptions === 'function'
@@ -384,6 +398,11 @@ export class ExecutionCore extends ResultCore {
         const toolMode = config?.toolMode || 'function_call';
         const isPromptMode = toolMode === 'xml' || toolMode === 'json';
 
+        // CPF-07：checkpointMode='skip' 时本批次不创建检查点——流式早启动路径对每个工具单独
+        // 调用本方法，若各自建检查点会产生 N 组 before/after 物理存档；由 ToolIterationLoopService
+        // 按「一次模型回复 = 一个工具批次」统一创建一组（tool_batch）。短路在判定之前，
+        // 避免不必要的配置读取与节点反查。
+        const skipCheckpointCreation = checkpointMode === 'skip';
         // 检查点创建名（CPF-05）：
         // - 单个调用：用工具名（search_in_files 纯 search 模式只读，不创建存档）
         // - 批量调用：只有批内存在「当前已配置的写工具」时才用 tool_batch；
@@ -395,7 +414,7 @@ export class ExecutionCore extends ResultCore {
         const configuredCheckpointTools = checkpointConfig
             ? new Set([...(checkpointConfig.beforeTools ?? []), ...(checkpointConfig.afterTools ?? [])])
             : undefined;
-        const toolNameForCheckpoint: string | null = (() => {
+        const toolNameForCheckpoint: string | null = skipCheckpointCreation ? null : (() => {
             if (calls.length === 1) {
                 const single = calls[0];
                 if (single.name === 'search_in_files' && single.args?.mode !== 'replace') {
@@ -430,6 +449,49 @@ export class ExecutionCore extends ResultCore {
         // （checkpoint 根锁与路径锁互斥，入口取锁会死锁/冲突），写盘锁推迟到 diffManager
         // 写盘时获取。混合批（含 search_in_files replace 或其他写工具）保持同步语义，零变化。
         const isDiffReviewOnlyBatch = calls.length > 0 && calls.every(call => isDiffReviewToolCall(call.name));
+        // CPF-07：批量路径（tool_batch）透传批内工具名，供 CheckpointManager 按 beforeTools/afterTools
+        // 交集精确判定是否创建；单工具路径不需要（CheckpointManager 按工具名精确判定）。
+        // before 用原始 calls：before 创建先于 preparedList（策略拒绝判定），无法预知拒绝结果；
+        // 被拒工具尚未执行，before 存档内容仍是当时的工作区状态，语义无害。after 在下方按
+        // 实际执行的工具重算（排除被拒/参数错误/中止未执行的调用，与 orchestrator M3 同一语义）。
+        const checkpointBatchToolNames = toolNameForCheckpoint === 'tool_batch'
+            ? calls.map(call => call.name)
+            : undefined;
+        // CP-PARTIAL-1：工具执行存档只扫描模型传入参数涉及的文件（不再全量扫描工作区）。
+        // 对批内每个调用提取受影响路径；任一调用无法确定（execute_command 等副作用不可知）
+        // → 整个批次 affectedPaths = undefined（回退全量快照，保证快照完整性）。
+        // 单工具路径（toolNameForCheckpoint = 工具名）同样提取。
+        // workspaceRootFsPath 来自 resolvedWorkspaceUri（activeWorkspaceUri 或会话元数据）；
+        // 缺失/无法解析为本地 fs 路径时传 undefined（全量）。
+        // before 基于原始 calls；after 基于实际执行的工具重算（见下方 executedBatchToolNames）。
+        const resolveCheckpointAffectedPaths = (targetCalls: readonly FunctionCallInfo[]): string[] | undefined => {
+            if (!toolNameForCheckpoint || !resolvedWorkspaceUri) {
+                return undefined;
+            }
+            const workspaceRootFsPath = workspaceUriToFsPath(resolvedWorkspaceUri);
+            if (!workspaceRootFsPath) {
+                return undefined;
+            }
+            const accumulated: string[] = [];
+            const seen = new Set<string>();
+            for (const call of targetCalls) {
+                const paths = extractAffectedPaths(call.name, call.args, workspaceRootFsPath);
+                if (paths === null) {
+                    return undefined;
+                }
+                for (const p of paths) {
+                    if (!seen.has(p)) {
+                        seen.add(p);
+                        accumulated.push(p);
+                    }
+                }
+            }
+            return accumulated.length > 0 ? accumulated : undefined;
+        };
+        const checkpointAffectedPaths = resolveCheckpointAffectedPaths(calls);
+        const checkpointAffectedPathsOption = checkpointAffectedPaths
+            ? { affectedPaths: checkpointAffectedPaths }
+            : undefined;
         let beforeCheckpointPromise: Promise<CheckpointRecord | null> | null = null;
         let resolvedMessageNodeId: string | undefined;
         if (toolNameForCheckpoint && this.checkpointService && conversationId !== undefined && messageIndex !== undefined) {
@@ -442,7 +504,10 @@ export class ExecutionCore extends ResultCore {
                     messageIndex,
                     toolNameForCheckpoint,
                     'before',
-                    resolvedMessageNodeId
+                    resolvedMessageNodeId,
+                    checkpointBatchToolNames
+                        ? { batchToolNames: checkpointBatchToolNames, ...checkpointAffectedPathsOption }
+                        : checkpointAffectedPathsOption
                 ).catch((error) => {
                     // deferred 模式下 checkpoint 失败不升级为整批失败：工具已并行执行完成、
                     // 真实副作用结果已收集在 responses/toolResults，泵循环 catch 会把全部调用
@@ -460,7 +525,10 @@ export class ExecutionCore extends ResultCore {
                     messageIndex,
                     toolNameForCheckpoint,
                     'before',
-                    resolvedMessageNodeId
+                    resolvedMessageNodeId,
+                    checkpointBatchToolNames
+                        ? { batchToolNames: checkpointBatchToolNames, ...checkpointAffectedPathsOption }
+                        : checkpointAffectedPathsOption
                 );
                 if (beforeCheckpoint) {
                     checkpoints.push(beforeCheckpoint);
@@ -734,13 +802,30 @@ export class ExecutionCore extends ResultCore {
             // BCP-01: 复用 before 已反查的节点 ID（与 before 同消息，index 不变；
             // 工具执行只在其后追加 functionResponse，不影响该索引位置的节点），
             // 避免同一批次内第二次全量重读 transcript 文件。
+            // CPF-07 精确化：after 排除本批被参数错误/策略拒绝/中止未执行的工具（未执行，
+            // 不参与 afterTools 判定与受影响路径提取）——否则「批内唯一被执行工具未配存档、
+            // 被拒工具配了存档」会多建一对空批次存档（与 orchestrator M3 同一语义）。
+            // 执行循环结束时 index 指向第一个未处理调用（正常完成 = preparedList.length，
+            // abort break 时 = 未执行段起点），slice(0, index) 精确限定已结算范围。
+            const executedCalls = preparedList
+                .slice(0, index)
+                .filter(item => !item.error && !item.rejectionReason)
+                .map(item => item.executionCall);
+            const executedBatchToolNames = toolNameForCheckpoint === 'tool_batch'
+                ? executedCalls.map(call => call.name)
+                : undefined;
+            const executedAffectedPaths = resolveCheckpointAffectedPaths(executedCalls);
+            const afterOptions = executedBatchToolNames
+                ? { batchToolNames: executedBatchToolNames, ...(executedAffectedPaths ? { affectedPaths: executedAffectedPaths } : {}) }
+                : (executedAffectedPaths ? { affectedPaths: executedAffectedPaths } : undefined);
             try {
                 const afterCheckpoint = await this.checkpointService.createToolExecutionCheckpoint(
                     conversationId,
                     messageIndex,
                     toolNameForCheckpoint,
                     'after',
-                    resolvedMessageNodeId
+                    resolvedMessageNodeId,
+                    afterOptions
                 );
                 if (afterCheckpoint) {
                     checkpoints.push(afterCheckpoint);
