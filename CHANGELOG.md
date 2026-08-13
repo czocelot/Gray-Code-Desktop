@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+## [1.7.18dev] - 2026-08-13
+
 ### Added：聊天消息字号调节（仅作用于用户消息与 AI 消息，不影响 UI 其它部分）
   - 设置 → 外观 新增「用户消息字号」与「AI 消息字号」两个滑块（8-32px，默认 13）：用户消息字号作用于你发送的消息显示与输入框文字；AI 消息字号作用于 AI 回复正文、思考块与流式输出（思考块比正文小 1px 保持层级）；界面其它部分（标签栏/侧栏/按钮等）字号不受影响。
   - 持久化到 ui.appearance.userMessageFontSize / assistantMessageFontSize（可 Settings Sync），经 CSS 变量（--gc-msg-user-font-size / --gc-msg-assistant-font-size）应用，三语 i18n + 设置搜索锚点收录。

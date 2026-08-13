@@ -10,6 +10,8 @@ are tracked in the root `CHANGELOG.md`.
 
 ## [Unreleased]
 
+## [1.7.18dev] - 2026-08-13
+
 ### Added：代码查看面板「打开为新页面」——同级标签页编辑文件（桌面版）
   - 代码查看面板（CodeView）头部新增「打开为新页面」按钮（磁盘文件可用）：点击后在**与对话同级的标签页栏**打开纯文本编辑器页签（与「新建标签页」同一层级，可拖拽排序/切换/关闭），编辑工作区内文本文件并 Ctrl+S 保存（fileEditor.saveFile 消息；写文件复用工作区包含校验与 realpath 复核）；同一文件重复打开直接切换已有页签；未保存更改关闭前确认（覆盖页签栏 × 与页内关闭按钮两条路径）。
   - **编辑器背景半透明**：文件编辑器（含编辑区）背景接入全局半透明表面色（随「UI 不透明度」设置混合透明），文字/图标保持全不透明，可透出桌面背景图/窗口背景。
@@ -593,6 +595,8 @@ are tracked in the root `CHANGELOG.md`.
   - 修复自定义协议 MIME 缺失/大小写敏感路径校验（Windows 路径归一化）
   - 修复 diff 预览右栏恒空与 sessionId 失效（两种 diff 路径分别处理）
   - 修复 findFiles 默认跳过 dist/build 导致 AI 无法检查构建产物（改为设置可覆盖）
+  - 修复 workspaceState/globalState 导出 null（JSON 文件持久化）
+  - 修复 `require('./vscode-shim')` 打包后必崩（改为具名导入）
   - 修复 workspaceState/globalState 导出 null（JSON 文件持久化）
   - 修复 `require('./vscode-shim')` 打包后必崩（改为具名导入）
   - 修复 workspaceState/globalState 导出 null（JSON 文件持久化）
