@@ -514,9 +514,9 @@ describe('SummarizeService.handleAutoSummarize - 当前轮超预算（auto 不�
         }
     });
 
-    test('单超大轮（auto）：直接放弃规划（NOT_ENOUGH_ROUNDS，不调 AI）——当前轮即全部历史，无法在不吞用户消息的前提下总结', async () => {
+    test('单超大轮（auto）：轮内截断（保留首条用户消息原文，总结已完成的工具前缀）', async () => {
         const singleOversizedRound: Content[] = [
-            userMsg('r1', 40), fcMsg('fc1', 40), frMsg('fc1', 40),
+            userMsg('r1', 40, { id: 'u1' }), fcMsg('fc1', 40), frMsg('fc1', 40),
             fcMsg('fc2', 40), frMsg('fc2', 40), modelMsg('done', 40)
         ];
 
@@ -527,13 +527,21 @@ describe('SummarizeService.handleAutoSummarize - 当前轮超预算（auto 不�
 
         const result = await service.handleAutoSummarize('conv1', 'cfg1');
 
-        expect(result.success).toBe(false);
-        if (!result.success) {
-            // 切点钳制到最后一条真实用户消息后无旧轮可总结 → planner 直接放弃（不再白烧一次 AI 生成）
-            expect(result.error.code).toBe('NOT_ENOUGH_ROUNDS');
+        // 单轮长工具回合：auto 允许轮内截断（上游 4701b973，取代旧的直接放弃）——
+        // 首条用户消息受锚点保护不标记（原文保留发送），只总结其后的已完成工具前缀。
+        expect(result.success).toBe(true);
+        if (result.success) {
+            expect(result.insertIndex).toBe(5);
+            expect(result.removedCount).toBe(4);
         }
-        // 用户消息与工具交互原样保留，未做任何替换
-        expect(liveHistory.map(msgLabel)).toEqual(['r1', 'fc1', 'fc1', 'fc2', 'fc2', 'done']);
+        // 用户消息 r1 原样保留（不标记），工具前缀标记为已总结，总结插入在工具前缀之后
+        const labels = liveHistory.map(msgLabel);
+        expect(labels[0]).toBe('r1');
+        expect(labels[5]).toContain('[对话总结]');
+        expect(labels[6]).toBe('done');
+        expect(liveHistory[0].isSummarized).toBeUndefined();
+        expect(liveHistory[1].isSummarized).toBe(true);
+        expect(liveHistory[4].isSummarized).toBe(true);
     });
 });
 

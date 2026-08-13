@@ -46,8 +46,8 @@ describe('StreamChunkProcessor - 视图缺失时 H6 中止语义', () => {
   const postMessage = jest.fn();
   const viewRef: ViewRef = { current: undefined };
 
-  const makeProcessor = (conversationId = 'conv-1', streamId = 'stream-1'): StreamChunkProcessor =>
-    new StreamChunkProcessor(() => viewRef.current as any, conversationId, streamId);
+  const makeProcessor = (conversationId = 'conv-1', streamId = 'stream-1', allowHeadlessConsume = false): StreamChunkProcessor =>
+    new StreamChunkProcessor(() => viewRef.current as any, conversationId, streamId, allowHeadlessConsume);
 
   beforeEach(() => {
     postMessage.mockClear();
@@ -181,8 +181,10 @@ describe('StreamChunkProcessor - 视图缺失时 H6 中止语义', () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('从未有视图的流（后台任务）：isViewUnreachable() 恒 false，保持继续消费语义', () => {
-    const processor = makeProcessor();
+  it('从未有视图的流（后台任务，allowHeadlessConsume=true）：isViewUnreachable() 恒 false，保持继续消费语义', () => {
+    // 后台任务路径经 ChatHandlers 以 allowHeadlessConsume=true 构造（!ctx.postMessage），
+    // 无视图时仍继续消费后端流；默认（false）下流启动即无视图判不可达
+    const processor = makeProcessor('conv-1', 'stream-1', true);
     // viewRef.current 初始为 undefined（见 beforeEach 前的声明），
     // 本测试不设置视图，模拟「流启动时视图已不可达」的后台任务场景
     viewRef.current = undefined;

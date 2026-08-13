@@ -186,7 +186,9 @@ describe('编辑/删除接口消息索引 id 校验', () => {
             const storage = new MemoryStorageAdapter();
             const realManager = new ConversationManager(storage);
             await realManager.createConversation('c1', 'race');
-            await storage.saveHistory('c1', history);
+            // fork 的 createConversation 会缓存空历史种子（perf），直写 storage 会绕过缓存
+            // 导致读路径命中陈旧空历史；经 manager 仓储写入可同步缓存，语义与真实写路径一致
+            await realManager.getTranscriptRepository('c1').replaceContents(history);
 
             const { flowService, conversationManager, checkpointService, diffInterruptService } = createChatFlowHarness();
             let firstRead = true;
@@ -236,7 +238,8 @@ describe('编辑/删除接口消息索引 id 校验', () => {
             const storage = new MemoryStorageAdapter();
             const realManager = new ConversationManager(storage);
             await realManager.createConversation('c_metadata', 'metadata failure');
-            await storage.saveHistory('c_metadata', history);
+            // 同上：经 manager 仓储写入（同步缓存），避免直写 storage 命中空历史缓存种子
+            await realManager.getTranscriptRepository('c_metadata').replaceContents(history);
             jest.spyOn(realManager as any, 'invalidateContextManagementState')
                 .mockRejectedValueOnce(new Error('metadata disk failure'));
 
@@ -265,3 +268,4 @@ describe('编辑/删除接口消息索引 id 校验', () => {
         });
     });
 });
+

@@ -72,7 +72,8 @@ vi.mock('../../components/tabs', () => ({
   ConversationTabs: { name: 'ConversationTabs', template: '<div />' }
 }))
 vi.mock('../../components/common', () => ({
-  CustomScrollbar: { name: 'CustomScrollbar', template: '<div><slot /></div>' }
+  CustomScrollbar: { name: 'CustomScrollbar', template: '<div><slot /></div>' },
+  ConfirmDialog: { name: 'ConfirmDialog', template: '<div />' }
 }))
 vi.mock('../../components/backgroundTasks/BackgroundTaskBar.vue', () => ({
   default: { name: 'BackgroundTaskBar', template: '<div />' }

@@ -74,6 +74,19 @@ export class ChannelManager {
     setRetryStatusCallback(callback: RetryStatusCallback): void {
         this.retryStatusCallback = callback;
     }
+
+    /**
+     * 重试状态通知路由（fork 既有语义）：
+     * - 请求级 retryStatusCallback（SubAgent → Monitor 路由）优先于全局回调；
+     * - suppressRetryNotification 只抑制全局回调（主窗口通知不被污染），不抑制显式传入的
+     *   请求级回调——请求级回调是调用方主动订阅的。
+     */
+    private notifyRetryStatus(request: GenerateRequest, status: Parameters<RetryStatusCallback>[0]): void {
+        const callback = request.retryStatusCallback ?? this.retryStatusCallback;
+        if (!callback) return;
+        if (!request.retryStatusCallback && request.suppressRetryNotification) return;
+        callback(status);
+    }
     
     /**
      * 设置 MCP 管理器（用于获取 MCP 工具声明）
@@ -362,8 +375,8 @@ export class ChannelManager {
                 }
                 
                 // 如果是重试成功，通知前端
-                if (attempt > 1 && this.retryStatusCallback && !request.suppressRetryNotification) {
-                    this.retryStatusCallback({
+                if (attempt > 1) {
+                    this.notifyRetryStatus(request, {
                         type: 'retrySuccess',
                         attempt: attempt - 1,
                         maxAttempts: maxRetries,
@@ -406,8 +419,8 @@ export class ChannelManager {
                 // 检查是否可重试
                 if (!retryEnabled || !this.isRetryableError(error) || attempt >= totalAttempts) {
                     // 不能重试或已达到最大重试次数
-                    if (attempt > 1 && this.retryStatusCallback && !request.suppressRetryNotification) {
-                        this.retryStatusCallback({
+                    if (attempt > 1) {
+                        this.notifyRetryStatus(request, {
                             type: 'retryFailed',
                             attempt: Math.min(maxRetries, attempt - 1),
                             maxAttempts: maxRetries,
@@ -429,18 +442,16 @@ export class ChannelManager {
                 }
                 
                 // 通知前端正在重试
-                if (this.retryStatusCallback && !request.suppressRetryNotification) {
-                    this.retryStatusCallback({
-                        type: 'retrying',
-                        attempt,
-                        maxAttempts: maxRetries,
-                        error: errorMessage,
-                        errorDetails,
-                        nextRetryIn: retryInterval,
-                        createdAt: Date.now(),
-                        conversationId: request.conversationId
-                    });
-                }
+                this.notifyRetryStatus(request, {
+                    type: 'retrying',
+                    attempt,
+                    maxAttempts: maxRetries,
+                    error: errorMessage,
+                    errorDetails,
+                    nextRetryIn: retryInterval,
+                    createdAt: Date.now(),
+                    conversationId: request.conversationId
+                });
                 
                 // 等待后重试（支持取消）
                 await this.delay(retryInterval, request.abortSignal);
@@ -580,8 +591,8 @@ export class ChannelManager {
                     : (async function* () { yield firstResult.value; yield* stream; })();
 
                 // 如果是重试成功，通知前端（请求已实际建立）
-                if (attempt > 1 && this.retryStatusCallback && !request.suppressRetryNotification) {
-                    this.retryStatusCallback({
+                if (attempt > 1) {
+                    this.notifyRetryStatus(request, {
                         type: 'retrySuccess',
                         attempt: attempt - 1,
                         maxAttempts: maxRetries,
@@ -710,8 +721,8 @@ export class ChannelManager {
                 // 检查是否可重试
                 if (!retryEnabled || !this.isRetryableError(error) || attempt >= totalAttempts) {
                     // 不能重试或已达到最大重试次数
-                    if (attempt > 1 && this.retryStatusCallback && !request.suppressRetryNotification) {
-                        this.retryStatusCallback({
+                    if (attempt > 1) {
+                        this.notifyRetryStatus(request, {
                             type: 'retryFailed',
                             attempt: Math.min(maxRetries, attempt - 1),
                             maxAttempts: maxRetries,
@@ -733,18 +744,16 @@ export class ChannelManager {
                 }
                 
                 // 通知前端正在重试
-                if (this.retryStatusCallback && !request.suppressRetryNotification) {
-                    this.retryStatusCallback({
-                        type: 'retrying',
-                        attempt,
-                        maxAttempts: maxRetries,
-                        error: errorMessage,
-                        errorDetails,
-                        nextRetryIn: retryInterval,
-                        createdAt: Date.now(),
-                        conversationId: request.conversationId
-                    });
-                }
+                this.notifyRetryStatus(request, {
+                    type: 'retrying',
+                    attempt,
+                    maxAttempts: maxRetries,
+                    error: errorMessage,
+                    errorDetails,
+                    nextRetryIn: retryInterval,
+                    createdAt: Date.now(),
+                    conversationId: request.conversationId
+                });
                 
                 // 等待后重试（支持取消）—— 先停保活定时器：错误后到 delay 完成之间定时器仍存活，
                 // 会在无活动流时发出保活请求

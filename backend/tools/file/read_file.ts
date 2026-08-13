@@ -50,13 +50,6 @@ const MAX_BATCH_TOTAL_BYTES = 50 * 1024 * 1024;
 const BATCH_READ_CONCURRENCY = 8;
 
 /**
- * 批量 files 条数上限（发现 16）：超出截断并在结果中置 truncated。
- * 与 get_symbols 的 MAX_SYMBOL_PATHS = 20 同口径——单文件 5MB 护栏挡不住
- * 批量路径的累计爆炸（50 张图 × 5MB ≈ 250MB base64 一次性读入内存）。
- */
-const MAX_BATCH_FILES = 20;
-
-/**
  * 多模态附件累计字节上限（原始字节，base64 编码前）：超出后不再追加 inlineData 附件，
  * 并在结果中置 truncated/multimodalTruncated，让模型知道附件被截断。
  */
@@ -540,12 +533,6 @@ export function createReadFileTool(
             // 空 files 应视为“未提供批量参数”，不能误判成单双模式冲突。
             const hasBatchFiles = !!batchFiles && batchFiles.length > 0;
 
-            // 批量条数上限（发现 16）：超出截断并在结果中置 truncated 标记
-            const batchFilesTruncated = !!batchFiles && batchFiles.length > MAX_BATCH_FILES;
-            if (batchFilesTruncated && batchFiles) {
-                batchFiles = batchFiles.slice(0, MAX_BATCH_FILES);
-            }
-
             if (hasSinglePath && hasBatchFiles) {
                 return { success: false, error: 'Provide either path or files, not both.' };
             }
@@ -672,7 +659,7 @@ export function createReadFileTool(
                     totalCount: fileRequests.length,
                     multiRoot: isMultiRoot,
                     // 发现 16：files 超条数上限或多模态附件超累计字节上限时置位
-                    truncated: batchFilesTruncated || multimodalTruncated,
+                    truncated: multimodalTruncated,
                     multimodalTruncated
                 },
                 multimodal: allMultimodal.length > 0 ? allMultimodal : undefined,

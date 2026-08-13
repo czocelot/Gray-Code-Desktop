@@ -62,9 +62,9 @@ import type {
     HttpRequestOptions
 } from '../types';
 
-// 兼容性常量：发送给 Anthropic 的 user id 前缀（历史版本沿用 limcode 品牌）。
-// 修改会改变上游侧用户标识，可能影响 Anthropic 侧的用户级缓存/配额统计，请谨慎变更。
-const ANTHROPIC_USER_ID_PREFIX = 'limcode-conversation-';
+// 品牌标识前缀：与 openai.ts 的 DEEPSEEK_USER_ID_PREFIX 同口径，对齐 fork 产品名 GrayCode（上游 690726db 品牌名清理）。
+// 注意：vscodeStorageAdapter 的 limcode.* 持久化存储 key 不在此列（改 key 会丢用户数据）。
+const ANTHROPIC_USER_ID_PREFIX = 'graycode-conversation-';
 
 /**
  * Anthropic 格式转换器

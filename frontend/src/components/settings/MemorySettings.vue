@@ -1030,17 +1030,3 @@ watch(selectedWorkspaceUri, (next, prev) => {
   align-self: center;
 }
 </style>
-.truncated-notice i {
-  margin-top: 2px;
-  flex-shrink: 0;
-}
-
-.entry-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-  align-self: center;
-}
-</style>
-}
-</style>

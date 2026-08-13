@@ -135,26 +135,28 @@ async function insertSingleFile(
     }
 
     const absolutePath = uri.fsPath;
-    if (!fs.existsSync(absolutePath)) {
-        return { path: filePath, success: false, error: `File not found: ${filePath}. Use write_file to create new files.` };
-    }
 
-    // 文件大小护栏：超大文件全量 readFileSync 会阻塞 extension host，先 stat 拦截。
+    // 文件存在性 + 大小护栏：单次 stat 即可（ENOENT 归为文件不存在），
+    // 与 delete_code/write_file 同口径（异步，不阻塞桌面主进程）。
+    let fileStat;
     try {
-        const stat = fs.statSync(absolutePath);
-        if (stat.size > MAX_EDIT_FILE_BYTES) {
-            return {
-                path: filePath,
-                success: false,
-                error: `File is too large (${formatFileSize(stat.size)}, limit ${formatFileSize(MAX_EDIT_FILE_BYTES)}). Editing files this large is not supported; use write_file to replace the whole file, or edit a smaller file.`
-            };
+        fileStat = await fs.promises.stat(absolutePath);
+    } catch (e: any) {
+        if (e?.code === 'ENOENT') {
+            return { path: filePath, success: false, error: `File not found: ${filePath}. Use write_file to create new files.` };
         }
-    } catch (e) {
         return { path: filePath, success: false, error: `Failed to stat file: ${e instanceof Error ? e.message : String(e)}` };
     }
+    if (fileStat.size > MAX_EDIT_FILE_BYTES) {
+        return {
+            path: filePath,
+            success: false,
+            error: `File is too large (${formatFileSize(fileStat.size)}, limit ${formatFileSize(MAX_EDIT_FILE_BYTES)}). Editing files this large is not supported; use write_file to replace the whole file, or edit a smaller file.`
+        };
+    }
 
     try {
-        const rawBuffer = fs.readFileSync(absolutePath);
+        const rawBuffer = await fs.promises.readFile(absolutePath);
         // 编码防护：非 UTF-8 文件读-改-写会永久损坏原编码
         const encodingIssue = detectNonUtf8Encoding(rawBuffer);
         if (encodingIssue) {

@@ -66,7 +66,9 @@ function createWallclockHarness() {
     };
     const checkpointService = {
         createModelMessageCheckpoint: jest.fn().mockResolvedValue(null),
-        createToolExecutionCheckpoint: jest.fn().mockResolvedValue(null)
+        createToolExecutionCheckpoint: jest.fn().mockResolvedValue(null),
+        // 合并后 ToolIterationLoopService 需要逐工具判定 checkpoint 配置（isToolConfiguredForCheckpoint）
+        isToolConfiguredForCheckpoint: jest.fn().mockReturnValue(false)
     };
     const service = new ToolIterationLoopService(
         channelManager as never,

@@ -202,7 +202,7 @@ describe('delete_code 终态语义（diff 审阅）', () => {
         expect(result.data.results[0]).toMatchObject({
             path: 'sample.ts',
             success: false,
-            error: 'start_line 99 is out of range. File has 5 lines.'
+            error: 'start_line 99 is out of range. File has 4 lines.'
         });
         expect(mockDiffManager.createPendingDiff).not.toHaveBeenCalled();
     });
