@@ -268,7 +268,7 @@ export class SettingsCore {
     /**
      * 按需读取指定设置键（轻量快照）。
      *
-     * 用于请求路径上只读标量字段（checkForUpdates / updateChannel / proxy / storagePath / ui 等）
+     * 用于请求路径上只读标量字段（checkForUpdates / proxy / storagePath / ui 等）
      * 的消费点，避免 getSettings() 每次对整个设置树（尤其庞大的 toolsConfig、
      * toolsEnabled / toolAutoExec 等嵌套对象）做全量深拷贝带来的分配与 GC 压力。
      *
@@ -289,7 +289,7 @@ export class SettingsCore {
     }
 
     /**
-     * 轻量读取更新检查相关设置（checkForUpdates / updateChannel / proxy）。
+     * 轻量读取更新检查相关设置（checkForUpdates / proxy）。
      *
      * 供 UpdateChecker 回调等只读消费点使用：仅构造三个字段的快照，proxy 走 cloneConfig
      * 深拷贝（proxy 仅含 enabled / url / insecureSkipVerify 三个小字段，拷贝成本远低于整棵树）。

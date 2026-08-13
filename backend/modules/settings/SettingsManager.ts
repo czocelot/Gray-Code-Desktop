@@ -190,7 +190,7 @@ export class SettingsManager {
     }
 
     /**
-     * 轻量读取更新检查相关设置（checkForUpdates / updateChannel / proxy）。
+     * 轻量读取更新检查相关设置（checkForUpdates / proxy）。
      * 转发 SettingsCore.getUpdateSettings。
      */
     getUpdateSettings(): Readonly<Pick<GlobalSettings, 'checkForUpdates' | 'proxy'>> {
