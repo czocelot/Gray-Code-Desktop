@@ -291,7 +291,8 @@ const ja: BackendLanguageMessages = {
                     addModelsFailed: 'モデルの追加に失敗しました',
                     removeModelFailed: 'モデルの削除に失敗しました',
                     modelNotInList: 'モデルがリストにありません',
-                    setActiveModelFailed: 'アクティブモデルの設定に失敗しました'
+                    setActiveModelFailed: 'アクティブモデルの設定に失敗しました',
+                    updateModelFailed: 'モデル情報の更新に失敗しました'
                 }
             },
             mcp: {
@@ -712,6 +713,7 @@ description: "このスキルの機能と使用場面の簡単な説明"
             addModelsFailed: 'モデルの追加に失敗しました',
             removeModelFailed: 'モデルの削除に失敗しました',
             setActiveModelFailed: 'アクティブモデルの設定に失敗しました',
+            updateModelFailed: 'モデル情報の更新に失敗しました',
             
             updateUISettingsFailed: 'UI 設定の更新に失敗しました',
             getSettingsFailed: '設定の取得に失敗しました',

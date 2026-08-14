@@ -292,7 +292,8 @@ const zhCN = {
                     addModelsFailed: '添加模型失败',
                     removeModelFailed: '移除模型失败',
                     modelNotInList: '模型不在列表中',
-                    setActiveModelFailed: '设置激活模型失败'
+                    setActiveModelFailed: '设置激活模型失败',
+                    updateModelFailed: '更新模型信息失败'
                 }
             },
             mcp: {
@@ -713,6 +714,7 @@ description: "简要描述该技能的功能及使用场景"
             addModelsFailed: '添加模型失败',
             removeModelFailed: '移除模型失败',
             setActiveModelFailed: '设置激活模型失败',
+            updateModelFailed: '更新模型信息失败',
             
             updateUISettingsFailed: '更新 UI 设置失败',
             getSettingsFailed: '获取设置失败',

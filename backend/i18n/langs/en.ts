@@ -291,7 +291,8 @@ const en: BackendLanguageMessages = {
                     addModelsFailed: 'Failed to add models',
                     removeModelFailed: 'Failed to remove model',
                     modelNotInList: 'Model not in list',
-                    setActiveModelFailed: 'Failed to set active model'
+                    setActiveModelFailed: 'Failed to set active model',
+                    updateModelFailed: 'Failed to update model info'
                 }
             },
             mcp: {
@@ -712,6 +713,7 @@ Project-level takes priority. Duplicate skill names only load the highest-priori
             addModelsFailed: 'Failed to add models',
             removeModelFailed: 'Failed to remove model',
             setActiveModelFailed: 'Failed to set active model',
+            updateModelFailed: 'Failed to update model info',
             
             updateUISettingsFailed: 'Failed to update UI settings',
             getSettingsFailed: 'Failed to get settings',

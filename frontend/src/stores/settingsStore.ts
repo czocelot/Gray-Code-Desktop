@@ -84,6 +84,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const userMessageFontSize = ref(13)
   // 外观设置：聊天 AI 消息字号（像素，默认 13，仅作用于 AI 消息显示）
   const assistantMessageFontSize = ref(13)
+  // 外观设置：编辑器（文件编辑页/代码查看抽屉）代码字号（像素，默认 13）
+  const editorFontSize = ref(13)
   // 外观设置：桌面主题模式（light=亮色 / dark=暗色 / auto=跟随系统，默认 auto）
   const theme = ref<'light' | 'dark' | 'auto'>('auto')
   // 模式刷新计数器（用于通知组件刷新模式列表）
@@ -211,6 +213,11 @@ export const useSettingsStore = defineStore('settings', () => {
     assistantMessageFontSize.value = clampFontSize(size)
   }
 
+  // 设置外观：编辑器（文件编辑页/代码查看抽屉）代码字号（8-32px）
+  function setEditorFontSize(size: number) {
+    editorFontSize.value = clampFontSize(size)
+  }
+
   // 设置外观：桌面主题模式（light / dark / auto）
   function setTheme(mode: 'light' | 'dark' | 'auto') {
     theme.value = mode
@@ -244,6 +251,7 @@ export const useSettingsStore = defineStore('settings', () => {
     uiOpacity,
     userMessageFontSize,
     assistantMessageFontSize,
+    editorFontSize,
     theme,
     promptModesVersion,
     configsVersion,
@@ -269,6 +277,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setUiOpacity,
     setUserMessageFontSize,
     setAssistantMessageFontSize,
+    setEditorFontSize,
     setTheme,
     refreshPromptModes,
     refreshConfigs

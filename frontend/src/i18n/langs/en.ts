@@ -1891,6 +1891,7 @@ const en: LanguageMessages = {
                 addTooltip: 'Add',
                 removeTooltip: 'Remove',
                 enabledTooltip: 'Currently enabled model',
+                editTooltip: 'Edit model info',
                 filterPlaceholder: 'Filter models...',
                 clearFilter: 'Clear filter',
                 noResults: 'No matching models',
@@ -1900,10 +1901,20 @@ const en: LanguageMessages = {
                     confirm: 'Clear',
                     cancel: 'Cancel'
                 },
+                editDialog: {
+                    title: 'Edit Model Info',
+                    nameLabel: 'Name',
+                    namePlaceholder: 'Display name (optional; falls back to model ID)',
+                    descLabel: 'Description',
+                    descPlaceholder: 'Model description (optional)',
+                    save: 'Save',
+                    cancel: 'Cancel'
+                },
                 errors: {
                     addFailed: sharedEn.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedEn.components.settings.modelManager.errors.removeFailed,
-                    setActiveFailed: sharedEn.components.settings.modelManager.errors.setActiveFailed
+                    setActiveFailed: sharedEn.components.settings.modelManager.errors.setActiveFailed,
+                    editFailed: sharedEn.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2946,6 +2957,12 @@ const en: LanguageMessages = {
                     description: 'Adjust the font size of AI replies (including thinking blocks and streaming text). UI elements are not affected.',
                     value: 'Font size',
                     hint: 'Applies only to AI messages in the chat; the rest of the UI keeps its default size.'
+                },
+                editorFontSize: {
+                    title: 'Editor Code Font Size',
+                    description: 'Adjust the font size of code text in the file editor page and the code viewer drawer. UI elements are not affected.',
+                    value: 'Font size',
+                    hint: 'Applies only to the file editor and code viewer drawer; the rest of the UI keeps its default size.'
                 },
                 saveSuccess: 'Saved successfully',
                 saveFailed: 'Save failed'

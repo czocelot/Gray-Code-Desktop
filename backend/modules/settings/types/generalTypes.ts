@@ -352,6 +352,14 @@ export interface GlobalSettings {
              * 默认 13。
              */
             assistantMessageFontSize?: number;
+
+            /**
+             * 编辑器（文件编辑页/代码查看抽屉）代码字号（像素）
+             *
+             * 仅作用于文件编辑界面与代码查看抽屉的代码文字，不改变 UI 其它部分的字号。
+             * 默认 13。
+             */
+            editorFontSize?: number;
         };
 
         /**
@@ -492,7 +500,9 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
             uiOpacity: 100,
             // 聊天消息字号（像素，默认 13，与 UI 基准字号一致）
             userMessageFontSize: 13,
-            assistantMessageFontSize: 13
+            assistantMessageFontSize: 13,
+            // 编辑器（文件编辑页/代码查看抽屉）代码字号（像素，默认 13）
+            editorFontSize: 13
         },
         sound: {
             enabled: false,

@@ -575,6 +575,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 update: (key, value) => Promise.resolve(this.context.globalState.update(key, value)),
             },
             globalStoragePath: this.context.globalStorageUri.fsPath,
+            // 检查完成发现新版本 → 推送给前端弹窗（与桌面端 BackendHost 对齐：
+            // 前端仅在挂载时查询一次 status，而启动检查延迟 10s 才完成，
+            // 不推送则扩展形态的自动更新提示永远不会出现）
+            onStatusChange: (status) => {
+                if (status.state === 'updateAvailable' && status.update) {
+                    this.sendCommand('update.checkAvailable', { update: status.update });
+                }
+            },
         });
         
         // 26. 初始化依赖管理器（使用自定义路径）

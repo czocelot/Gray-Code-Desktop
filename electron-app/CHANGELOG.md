@@ -10,6 +10,21 @@ are tracked in the root `CHANGELOG.md`.
 
 ## [Unreleased]
 
+## [1.7.19dev] - 2026-08-14
+
+### Added：编辑器代码字号调节（文件编辑页 + 代码查看抽屉）（桌面版）
+  - 设置 → 外观新增「编辑器代码字号」滑块（8-32px，默认 13）：作用于文件编辑页与代码查看抽屉的代码文字，不改变 UI 其它部分字号；经 CSS 变量 --gc-editor-font-size 应用，持久化到 ui.appearance.editorFontSize（可 Settings Sync），三语 i18n。
+
+### Added：代码查看抽屉（CodeView）接入 UI 不透明度（桌面版）
+  - 代码查看面板改用伪元素方案接入全局「UI 不透明度」设置（与文件编辑器一致），内容区随设置实时半透明、透出桌面背景图/窗口背景，文字/图标保持全不透明。
+
+### Added：模型管理器支持编辑模型名称/描述（编辑 AI 信息）（桌面版）
+  - 设置 → 渠道 → 模型管理器新增「编辑」按钮，可修改已有模型的显示名称与描述（留空清除）；后端新增 models.updateModel 消息（原子合并按 id 局部替换），成功推送渠道变更刷新各下拉框；新增 8 例回归测试。
+
+### Fixed：扩展形态更新检查完成不弹「发现新版本」
+  - webview/ChatViewProvider 与 bootstrap 创建 UpdateChecker 时补 onStatusChange 推送（与桌面端 BackendHost 对齐），扩展形态自动更新提示不再缺失。
+
+
 ## [1.7.18dev] - 2026-08-13
 
 ### Added：代码查看面板「打开为新页面」——同级标签页编辑文件（桌面版）

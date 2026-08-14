@@ -380,7 +380,7 @@ watch(() => props.filePath, () => {
   background: transparent;
   color: var(--vscode-editor-foreground, #cccccc);
   font-family: var(--vscode-editor-font-family, Consolas, 'Courier New', monospace);
-  font-size: var(--vscode-editor-font-size, 13px);
+  font-size: var(--gc-editor-font-size, var(--vscode-editor-font-size, 13px));
   line-height: 1.6;
   tab-size: 2;
   white-space: pre;

@@ -74,7 +74,9 @@ export function useUpdateSettings() {
       } else if (response?.version) {
         updateCheckResult.value = {
           type: 'success',
-          text: t('components.settings.settingsPanel.update.installedHint').replace('{version}', response.version)
+          text: t('components.settings.settingsPanel.update.installedHint')
+            .replace('{version}', response.version)
+            .replace('{path}', response.localPath || '')
         }
       }
     } catch (error: any) {

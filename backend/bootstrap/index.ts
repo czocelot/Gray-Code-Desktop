@@ -686,6 +686,12 @@ export class BackendRuntime {
                 update: (key, value) => Promise.resolve(this.context.globalState.update(key, value)),
             },
             globalStoragePath: this.context.globalStorageUri.fsPath,
+            // 检查完成发现新版本 → 推送给前端弹窗（与桌面端 BackendHost 对齐）
+            onStatusChange: (status) => {
+                if (status.state === 'updateAvailable' && status.update) {
+                    this.hooks.sendCommand('update.checkAvailable', { update: status.update });
+                }
+            },
         });
     }
 

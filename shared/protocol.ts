@@ -195,6 +195,7 @@ export const MESSAGE_NAMES = {
   'models.getModels': 'models.getModels',
   'models.removeModel': 'models.removeModel',
   'models.setActiveModel': 'models.setActiveModel',
+  'models.updateModel': 'models.updateModel',
 
 // ---- 通知 ----
   'notifications.agentStop': 'notifications.agentStop',

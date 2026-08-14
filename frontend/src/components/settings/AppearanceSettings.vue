@@ -49,6 +49,8 @@ const uiOpacity = ref(100)
 // 聊天消息字号（像素，默认 13；仅作用于用户输入消息与 AI 消息，不改变 UI 其它部分字号）
 const userMessageFontSize = ref(13)
 const assistantMessageFontSize = ref(13)
+// 编辑器（文件编辑页/代码查看抽屉）代码字号（像素，默认 13）
+const editorFontSize = ref(13)
 
 const defaultLoadingText = computed(() => t('common.loading'))
 
@@ -88,6 +90,7 @@ async function loadConfig() {
     uiOpacity.value = typeof appearance?.uiOpacity === 'number' ? appearance.uiOpacity : 100
     userMessageFontSize.value = typeof appearance?.userMessageFontSize === 'number' ? appearance.userMessageFontSize : 13
     assistantMessageFontSize.value = typeof appearance?.assistantMessageFontSize === 'number' ? appearance.assistantMessageFontSize : 13
+    editorFontSize.value = typeof appearance?.editorFontSize === 'number' ? appearance.editorFontSize : 13
     settingsStore.setAppearanceLoadingText(saved)
     settingsStore.setSelectionContextEnabled(savedSelectionContextEnabled)
     settingsStore.setSmoothStreaming(savedSmoothStreaming)
@@ -144,7 +147,8 @@ async function saveConfig() {
           wallpaperOpacity: wallpaperOpacity.value,
           uiOpacity: uiOpacity.value,
           userMessageFontSize: userMessageFontSize.value,
-          assistantMessageFontSize: assistantMessageFontSize.value
+          assistantMessageFontSize: assistantMessageFontSize.value,
+          editorFontSize: editorFontSize.value
         }
       }
     })
@@ -159,6 +163,7 @@ async function saveConfig() {
     settingsStore.setUiOpacity(uiOpacity.value)
     settingsStore.setUserMessageFontSize(userMessageFontSize.value)
     settingsStore.setAssistantMessageFontSize(assistantMessageFontSize.value)
+    settingsStore.setEditorFontSize(editorFontSize.value)
     applyWallpaperToStore()
 
     saveMessage.value = t('components.settings.appearanceSettings.saveSuccess')
@@ -189,6 +194,7 @@ async function resetToDefault() {
   uiOpacity.value = 100
   userMessageFontSize.value = 13
   assistantMessageFontSize.value = 13
+  editorFontSize.value = 13
   applyWallpaperToStore()
   await saveConfig()
 }
@@ -476,6 +482,29 @@ onMounted(() => {
           />
         </div>
         <p class="field-hint">{{ t('components.settings.appearanceSettings.assistantMessageFontSize.hint') }}</p>
+      </div>
+
+      <div class="form-group" data-search-anchor="editor-font-size">
+        <label class="group-label">
+          <i class="codicon codicon-code"></i>
+          {{ t('components.settings.appearanceSettings.editorFontSize.title') }}
+        </label>
+        <p class="field-description">{{ t('components.settings.appearanceSettings.editorFontSize.description') }}</p>
+
+        <div class="opacity-row">
+          <span class="opacity-label">{{ t('components.settings.appearanceSettings.editorFontSize.value') }}：{{ editorFontSize }}px</span>
+          <input
+            v-model.number="editorFontSize"
+            type="range"
+            min="8"
+            max="32"
+            step="1"
+            class="opacity-slider"
+            :disabled="isSaving"
+            @input="settingsStore.setEditorFontSize(editorFontSize)"
+          />
+        </div>
+        <p class="field-hint">{{ t('components.settings.appearanceSettings.editorFontSize.hint') }}</p>
       </div>
 
       <div class="actions">

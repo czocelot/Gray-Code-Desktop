@@ -11,5 +11,7 @@ export type {
     RemoveModelRequest,
     RemoveModelResponse,
     SetActiveModelRequest,
-    SetActiveModelResponse
+    SetActiveModelResponse,
+    UpdateModelRequest,
+    UpdateModelResponse
 } from './types';

@@ -1893,6 +1893,7 @@ const zhCN = {
                 addTooltip: '添加',
                 removeTooltip: '移除',
                 enabledTooltip: '当前启用的模型',
+                editTooltip: '编辑模型信息',
                 filterPlaceholder: '筛选模型...',
                 clearFilter: '清除筛选',
                 noResults: '没有匹配的模型',
@@ -1902,10 +1903,20 @@ const zhCN = {
                     confirm: '清除',
                     cancel: '取消'
                 },
+                editDialog: {
+                    title: '编辑模型信息',
+                    nameLabel: '名称',
+                    namePlaceholder: '显示名称（可选，留空则显示模型 ID）',
+                    descLabel: '描述',
+                    descPlaceholder: '模型描述（可选）',
+                    save: '保存',
+                    cancel: '取消'
+                },
                 errors: {
                     addFailed: sharedZhCN.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedZhCN.components.settings.modelManager.errors.removeFailed,
-                    setActiveFailed: sharedZhCN.components.settings.modelManager.errors.setActiveFailed
+                    setActiveFailed: sharedZhCN.components.settings.modelManager.errors.setActiveFailed,
+                    editFailed: sharedZhCN.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2948,6 +2959,12 @@ const zhCN = {
                     description: '调节 AI 回复（含思考块与流式输出）的字体大小。不改变 UI 其它部分的字号。',
                     value: '字号',
                     hint: '仅作用于聊天区 AI 消息；界面其它部分保持默认字号。'
+                },
+                editorFontSize: {
+                    title: '编辑器代码字号',
+                    description: '调节文件编辑页与代码查看抽屉中代码文字的字体大小。不改变 UI 其它部分的字号。',
+                    value: '字号',
+                    hint: '仅作用于文件编辑界面与代码查看抽屉；界面其它部分保持默认字号。'
                 },
                 saveSuccess: '保存成功',
                 saveFailed: '保存失败'

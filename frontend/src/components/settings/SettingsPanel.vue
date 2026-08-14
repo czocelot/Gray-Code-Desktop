@@ -701,6 +701,12 @@ const SEARCH_INDEX: SearchIndexEntry[] = [
     anchor: '[data-search-anchor="assistant-message-font-size"]'
   },
   {
+    key: 'appearance-editor-font-size', tab: 'appearance',
+    labelKey: 'components.settings.appearanceSettings.editorFontSize.title',
+    keywords: ['字号', '字体', '大小', 'font', 'size', '代码', '编辑器', '文件', '编辑', 'エディター', 'コード', 'フォント', 'サイズ'],
+    anchor: '[data-search-anchor="editor-font-size"]'
+  },
+  {
     key: 'memory', tab: 'memory',
     labelKey: 'components.settings.settingsPanel.sections.memory.title',
     keywords: ['记忆', 'memory', 'メモリ', '长期记忆', '向量', '检索', 'retrieval', '知识', '条目']

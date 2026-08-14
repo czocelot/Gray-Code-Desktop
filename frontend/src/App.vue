@@ -542,6 +542,15 @@ watch(
   },
   { immediate: true }
 )
+// 编辑器（文件编辑页/代码查看抽屉）字号 → CSS 变量：仅作用于代码文字，不改变 UI 其它部分字号
+watch(
+  () => settingsStore.editorFontSize,
+  (size) => {
+    const normalized = typeof size === 'number' && Number.isFinite(size) ? size : 13
+    document.documentElement.style.setProperty('--gc-editor-font-size', normalized + 'px')
+  },
+  { immediate: true }
+)
 
 let mediaQueryDispose: (() => void) | null = null
 
@@ -594,6 +603,9 @@ async function loadLanguageSettings() {
       )
       settingsStore.setAssistantMessageFontSize(
         typeof appearance.assistantMessageFontSize === 'number' ? appearance.assistantMessageFontSize : 13
+      )
+      settingsStore.setEditorFontSize(
+        typeof appearance.editorFontSize === 'number' ? appearance.editorFontSize : 13
       )
       if (settingsStore.wallpaperPath) {
         loadWallpaperImage(settingsStore.wallpaperPath)

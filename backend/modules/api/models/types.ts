@@ -57,3 +57,18 @@ export interface SetActiveModelResponse {
     success: boolean;
     error?: ApiErrorInfo;
 }
+
+// ========== 更新已有模型信息（name/description 等） ==========
+
+export interface UpdateModelRequest {
+    configId: string;
+    modelId: string;
+    /** 可编辑字段：名称与描述（未传则保持原值） */
+    name?: string;
+    description?: string;
+}
+
+export interface UpdateModelResponse {
+    success: boolean;
+    error?: ApiErrorInfo;
+}

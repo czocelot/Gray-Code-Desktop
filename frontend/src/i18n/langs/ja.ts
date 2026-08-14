@@ -1891,6 +1891,7 @@ const ja: LanguageMessages = {
                 addTooltip: '追加',
                 removeTooltip: '削除',
                 enabledTooltip: '現在有効なモデル',
+                editTooltip: 'モデル情報を編集',
                 filterPlaceholder: 'モデルをフィルター...',
                 clearFilter: 'フィルターをクリア',
                 noResults: '一致するモデルがありません',
@@ -1900,10 +1901,20 @@ const ja: LanguageMessages = {
                     confirm: 'クリア',
                     cancel: 'キャンセル'
                 },
+                editDialog: {
+                    title: 'モデル情報を編集',
+                    nameLabel: '名前',
+                    namePlaceholder: '表示名（任意。空の場合はモデル ID を表示）',
+                    descLabel: '説明',
+                    descPlaceholder: 'モデルの説明（任意）',
+                    save: '保存',
+                    cancel: 'キャンセル'
+                },
                 errors: {
                     addFailed: sharedJa.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedJa.components.settings.modelManager.errors.removeFailed,
-                    setActiveFailed: sharedJa.components.settings.modelManager.errors.setActiveFailed
+                    setActiveFailed: sharedJa.components.settings.modelManager.errors.setActiveFailed,
+                    editFailed: sharedJa.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2946,6 +2957,12 @@ const ja: LanguageMessages = {
                     description: 'AI の返信（思考ブロックとストリーミング表示を含む）の文字サイズを調整します。UI の他の部分には影響しません。',
                     value: '文字サイズ',
                     hint: 'チャットの AI メッセージにのみ適用され、UI の他の部分は既定サイズのままです。'
+                },
+                editorFontSize: {
+                    title: 'エディターのコード文字サイズ',
+                    description: 'ファイル編集ページとコード表示ドロワーのコード文字サイズを調整します。UI の他の部分には影響しません。',
+                    value: '文字サイズ',
+                    hint: 'ファイル編集画面とコード表示ドロワーにのみ適用され、UI の他の部分は既定サイズのままです。'
                 },
                 saveSuccess: '保存しました',
                 saveFailed: '保存に失敗しました'

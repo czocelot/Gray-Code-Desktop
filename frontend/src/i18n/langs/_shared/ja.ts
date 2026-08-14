@@ -228,6 +228,7 @@ const sharedJa = {
             modelManager: {
                 errors: {
                     addFailed: backendJa.modules.api.models.errors.addModelsFailed,
+                    editFailed: backendJa.modules.api.models.errors.updateModelFailed,
                     removeFailed: backendJa.modules.api.models.errors.removeModelFailed,
                     setActiveFailed: backendJa.modules.api.models.errors.setActiveModelFailed,
                 },

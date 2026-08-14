@@ -228,6 +228,7 @@ const sharedZhCN = {
             modelManager: {
                 errors: {
                     addFailed: backendZhCN.modules.api.models.errors.addModelsFailed,
+                    editFailed: backendZhCN.modules.api.models.errors.updateModelFailed,
                     removeFailed: backendZhCN.modules.api.models.errors.removeModelFailed,
                     setActiveFailed: backendZhCN.modules.api.models.errors.setActiveModelFailed,
                 },
