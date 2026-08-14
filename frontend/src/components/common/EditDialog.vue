@@ -33,6 +33,8 @@ interface Props {
   originalAttachments?: Attachment[]
   /** 是否为会话首条消息（根节点）：无父节点可挂编辑候选，保存仅原地改写、不会重新生成 */
   isRootMessage?: boolean
+  /** 被编辑消息的角色：'assistant' 时仅支持原地改写（不重新生成），隐藏检查点回档/分支/附件 */
+  role?: 'user' | 'assistant'
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -40,8 +42,12 @@ const props = withDefaults(defineProps<Props>(), {
   checkpoints: () => [],
   originalContent: '',
   originalAttachments: () => [],
-  isRootMessage: false
+  isRootMessage: false,
+  role: 'user'
 })
+
+// AI 消息编辑：仅原地改写文本，不重新生成、不截断后续消息
+const isAssistant = computed(() => props.role === 'assistant')
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -489,8 +495,8 @@ function handleRemoveAttachment(id: string) {
               />
             </div>
 
-            <!-- 附件区域 -->
-            <div class="attachment-section">
+            <!-- 附件区域（AI 消息编辑不显示：仅支持文本原地改写） -->
+            <div v-if="!isAssistant" class="attachment-section">
               <button class="attachment-btn" @click="triggerFileInput" :title="t('components.common.editDialog.addAttachment')">
                 <i class="codicon codicon-add"></i>
                 <span>{{ t('components.common.editDialog.addAttachment') }}</span>
@@ -513,12 +519,12 @@ function handleRemoveAttachment(id: string) {
               </div>
             </div>
 
-            <p v-if="hasCheckpoints" class="checkpoint-hint">
+            <p v-if="hasCheckpoints && !isAssistant" class="checkpoint-hint">
               <i class="codicon codicon-info"></i>
               {{ t('components.common.editDialog.checkpointHint') }}
             </p>
 
-            <p v-if="isRootMessage" class="root-message-hint">
+            <p v-if="isRootMessage && !isAssistant" class="root-message-hint">
               <i class="codicon codicon-info"></i>
               {{ t('components.common.editDialog.rootMessageHint') }}
             </p>
@@ -530,7 +536,7 @@ function handleRemoveAttachment(id: string) {
             </button>
 
             <button
-              v-if="latestCheckpoint"
+              v-if="latestCheckpoint && !isAssistant"
               class="dialog-btn restore"
               :disabled="!canSubmit"
               @click="handleRestoreAndEdit"
@@ -540,6 +546,7 @@ function handleRemoveAttachment(id: string) {
             </button>
 
             <button
+              v-if="!isAssistant"
               class="dialog-btn keep-branch"
               :disabled="!canSubmit"
               @click="handleEdit('keep')"
@@ -551,8 +558,8 @@ function handleRemoveAttachment(id: string) {
             <button
               class="dialog-btn confirm"
               :disabled="!canSubmit"
-              :title="isRootMessage ? t('components.common.editDialog.rootSaveHint') : undefined"
-              @click="handleEdit('branch')"
+              :title="!isAssistant && isRootMessage ? t('components.common.editDialog.rootSaveHint') : undefined"
+              @click="handleEdit(isAssistant ? 'keep' : 'branch')"
             >
               <span class="btn-label">{{ t('components.common.editDialog.save') }}</span>
             </button>

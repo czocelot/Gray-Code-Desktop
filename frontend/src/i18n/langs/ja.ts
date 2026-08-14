@@ -1891,7 +1891,6 @@ const ja: LanguageMessages = {
                 addTooltip: '追加',
                 removeTooltip: '削除',
                 enabledTooltip: '現在有効なモデル',
-                editTooltip: 'モデル情報を編集',
                 filterPlaceholder: 'モデルをフィルター...',
                 clearFilter: 'フィルターをクリア',
                 noResults: '一致するモデルがありません',
@@ -1901,20 +1900,10 @@ const ja: LanguageMessages = {
                     confirm: 'クリア',
                     cancel: 'キャンセル'
                 },
-                editDialog: {
-                    title: 'モデル情報を編集',
-                    nameLabel: '名前',
-                    namePlaceholder: '表示名（任意。空の場合はモデル ID を表示）',
-                    descLabel: '説明',
-                    descPlaceholder: 'モデルの説明（任意）',
-                    save: '保存',
-                    cancel: 'キャンセル'
-                },
                 errors: {
                     addFailed: sharedJa.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedJa.components.settings.modelManager.errors.removeFailed,
                     setActiveFailed: sharedJa.components.settings.modelManager.errors.setActiveFailed,
-                    editFailed: sharedJa.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2945,6 +2934,12 @@ const ja: LanguageMessages = {
                     description: '入力欄、設定ページ、メッセージエリアなどの UI パネルの背景の不透明度を調整し、ウィンドウ背景を透けさせます。',
                     opacity: '不透明度',
                     hint: '100 で完全不透明です。数値が低いほどパネルの背景が透明になり、文字とアイコンは鮮明なままです。遠隔操作 UI には影響しません。'
+                },
+                editorOpacity: {
+                    title: 'エディターの不透明度',
+                    description: 'ファイル編集画面の不透明度を個別に調整し、壁紙/ウィンドウ背景を透けさせます。未設定時はグローバル UI 不透明度に従います。',
+                    opacity: '不透明度',
+                    hint: 'ファイル編集タブのみに適用されます。コード文字と UI アイコンは不透明のままです。'
                 },
                 userMessageFontSize: {
                     title: 'ユーザーメッセージの文字サイズ',

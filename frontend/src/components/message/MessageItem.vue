@@ -48,6 +48,8 @@ const showResponseDialog = ref(false)
 // 消息角色判断
 const isUser = computed(() => props.message.role === 'user')
 const isTool = computed(() => props.message.role === 'tool')
+// AI（助手）消息：role === 'assistant'（区别于 !isUser，排除 tool/总结/背景任务回流等）
+const isAssistantMessage = computed(() => props.message.role === 'assistant')
 
 // 是否为总结消息
 const isSummary = computed(() => props.message.isSummary === true)
@@ -254,7 +256,7 @@ function handleRestoreAndRetry(checkpointId: string) {
       <MessageActions
         :class="{ 'actions-visible': showActions }"
         :message="message"
-        :can-edit="isUser"
+        :can-edit="isUser || (isAssistantMessage && !isStreaming)"
         :can-retry="!isUser"
         :can-branch="typeof message.backendIndex === 'number' && !isStreaming"
         :can-view-response="!isUser"
@@ -275,13 +277,14 @@ function handleRestoreAndRetry(checkpointId: string) {
       @restore-and-retry="handleRestoreAndRetry"
     />
 
-    <!-- 编辑对话框 -->
+    <!-- 编辑对话框：AI 消息仅原地改写（隐藏检查点回档/分支/附件） -->
     <EditDialog
       v-model="showEditDialog"
-      :checkpoints="checkpointsBeforeMessage"
+      :checkpoints="isUser ? checkpointsBeforeMessage : []"
       :original-content="message.content"
-      :original-attachments="message.attachments || []"
+      :original-attachments="isUser ? (message.attachments || []) : []"
       :is-root-message="message.parentId == null"
+      :role="isUser ? 'user' : 'assistant'"
       @edit="handleEdit"
       @restore-and-edit="handleRestoreAndEdit"
     />

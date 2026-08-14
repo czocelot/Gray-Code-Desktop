@@ -543,8 +543,59 @@ export const editBranchStream: MessageHandler = async (data, requestId, ctx) => 
 };
 
 /**
- * 注册聊天处理器
+ * 就地改写消息文本（编辑 AI 消息内容；不重新生成、不截断后续消息）。
+ *
+ * 与 chat.editBranchStream（编辑用户消息后重新生成）不同：本条只做文本级原地改写，
+ * 保留消息节点、后续消息、检查点与分支图。前端仅在编辑 assistant 消息时使用。
  */
+export const updateMessage: MessageHandler = async (data, requestId, ctx) => {
+  const { conversationId: rawConversationId, messageIndex, content, messageId } = data || {};
+  let conversationId: string;
+  try {
+    conversationId = assertSafeId(rawConversationId, 'conversationId');
+  } catch {
+    ctx.sendError(requestId, 'UPDATE_MESSAGE_ERROR', 'Invalid conversationId');
+    return;
+  }
+
+  if (!Number.isInteger(messageIndex) || messageIndex < 0 || typeof content !== 'string' || !content.trim()) {
+    ctx.sendError(requestId, 'UPDATE_MESSAGE_ERROR', 'Invalid messageIndex or content');
+    return;
+  }
+
+  // 稳定消息 ID 预检（防索引漂移：陈旧窗口请求指向另一条消息时不应静默改写错对象，
+  // 与 deleteMessage 的 messageId 预检同模式）
+  const expectedMessageId = typeof messageId === 'string' && messageId.trim() !== ''
+    ? messageId.trim()
+    : undefined;
+  if (expectedMessageId) {
+    try {
+      const currentMessage = await ctx.conversationManager.getMessage(conversationId, messageIndex);
+      if (!currentMessage || currentMessage.id !== expectedMessageId) {
+        ctx.sendResponse(requestId, {
+          success: false,
+          error: {
+            code: 'MESSAGE_CHANGED',
+            message: t('modules.api.chat.errors.messageChanged'),
+          },
+        });
+        return;
+      }
+    } catch (error: any) {
+      ctx.sendError(requestId, 'UPDATE_MESSAGE_ERROR', error?.message || t('webview.errors.updateMessageFailed'));
+      return;
+    }
+  }
+
+  try {
+    await ctx.conversationManager.updateMessage(conversationId, messageIndex, {
+      parts: [{ text: content }],
+    });
+    ctx.sendResponse(requestId, { success: true });
+  } catch (error: any) {
+    ctx.sendError(requestId, 'UPDATE_MESSAGE_ERROR', error?.message || t('webview.errors.updateMessageFailed'));
+  }
+};
 export function registerChatHandlers(registry: Map<string, MessageHandler>): void {
   registry.set(MESSAGE_NAMES.deleteMessage, deleteMessage);
   registry.set(MESSAGE_NAMES.deleteSingleMessage, deleteSingleMessage);
@@ -556,4 +607,5 @@ export function registerChatHandlers(registry: Map<string, MessageHandler>): voi
   registry.set(MESSAGE_NAMES['chat.releaseAgentMessages'], releaseAgentMessages);
   registry.set(MESSAGE_NAMES['chat.rerollStream'], rerollStream);
   registry.set(MESSAGE_NAMES['chat.editBranchStream'], editBranchStream);
+  registry.set(MESSAGE_NAMES['conversation.updateMessage'], updateMessage);
 }

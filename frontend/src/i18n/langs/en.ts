@@ -1891,7 +1891,6 @@ const en: LanguageMessages = {
                 addTooltip: 'Add',
                 removeTooltip: 'Remove',
                 enabledTooltip: 'Currently enabled model',
-                editTooltip: 'Edit model info',
                 filterPlaceholder: 'Filter models...',
                 clearFilter: 'Clear filter',
                 noResults: 'No matching models',
@@ -1901,20 +1900,10 @@ const en: LanguageMessages = {
                     confirm: 'Clear',
                     cancel: 'Cancel'
                 },
-                editDialog: {
-                    title: 'Edit Model Info',
-                    nameLabel: 'Name',
-                    namePlaceholder: 'Display name (optional; falls back to model ID)',
-                    descLabel: 'Description',
-                    descPlaceholder: 'Model description (optional)',
-                    save: 'Save',
-                    cancel: 'Cancel'
-                },
                 errors: {
                     addFailed: sharedEn.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedEn.components.settings.modelManager.errors.removeFailed,
                     setActiveFailed: sharedEn.components.settings.modelManager.errors.setActiveFailed,
-                    editFailed: sharedEn.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2945,6 +2934,12 @@ const en: LanguageMessages = {
                     description: 'Adjust the background opacity of interface panels such as the input box, settings page, and message area, letting the window background show through.',
                     opacity: 'Opacity',
                     hint: '100 is fully opaque; lower values make panel backgrounds more transparent while text and icons stay crisp. The remote control UI is not affected.'
+                },
+                editorOpacity: {
+                    title: 'Editor Opacity',
+                    description: 'Independently adjust the transparency of the file editor, letting the wallpaper/window background show through. Follows the global UI opacity when unset.',
+                    opacity: 'Opacity',
+                    hint: 'Applies only to the file editor tab; code text and UI icons stay fully opaque.'
                 },
                 userMessageFontSize: {
                     title: 'User Message Font Size',

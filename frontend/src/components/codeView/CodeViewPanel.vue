@@ -405,25 +405,10 @@ function onClose() {
   max-width: 92%;
   min-width: 440px;
   min-height: 0;
-  /* 半透明背景由 ::before 伪元素承担（background: transparent + 伪元素 opacity），
-     与 FileEditorPage 同款方案：opacity: var(--gc-ui-opacity) 惰性解析、实时跟随
-     UI 不透明度设置，透出桌面背景图/窗口背景 */
-  isolation: isolate;
-  background: transparent;
+  background: var(--vscode-editor-background, #1e1e1e);
   border-left: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.3));
   box-shadow: -6px 0 18px rgba(0, 0, 0, 0.35);
   overflow: hidden;
-}
-
-/* 半透明背景层：z-index:-1 保持在内容之下（isolation 上下文内），文字/图标全不透明 */
-.code-panel::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: var(--vscode-editor-background, #1e1e1e);
-  opacity: calc(var(--gc-ui-opacity, 1));
-  pointer-events: none;
 }
 
 .code-header {
@@ -775,7 +760,7 @@ function onClose() {
   overflow: auto;
   padding: 4px 0;
   font-family: var(--vscode-editor-font-family, Consolas, monospace);
-  font-size: var(--gc-editor-font-size, 12px);
+  font-size: 12px;
   line-height: 1.5;
 }
 

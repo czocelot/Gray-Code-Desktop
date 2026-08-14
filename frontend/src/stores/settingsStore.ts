@@ -86,6 +86,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const assistantMessageFontSize = ref(13)
   // 外观设置：编辑器（文件编辑页/代码查看抽屉）代码字号（像素，默认 13）
   const editorFontSize = ref(13)
+  // 外观设置：文件编辑界面独立不透明度（0-100，null = 未配置，跟随全局 UI 不透明度）
+  const editorOpacity = ref<number | null>(null)
   // 外观设置：桌面主题模式（light=亮色 / dark=暗色 / auto=跟随系统，默认 auto）
   const theme = ref<'light' | 'dark' | 'auto'>('auto')
   // 模式刷新计数器（用于通知组件刷新模式列表）
@@ -218,6 +220,15 @@ export const useSettingsStore = defineStore('settings', () => {
     editorFontSize.value = clampFontSize(size)
   }
 
+  // 设置外观：文件编辑界面独立不透明度（0-100；null = 未配置，跟随全局 UI 不透明度）
+  function setEditorOpacity(opacity: number | null) {
+    if (opacity === null) {
+      editorOpacity.value = null
+      return
+    }
+    editorOpacity.value = Math.min(100, Math.max(0, Math.round(opacity) || 0))
+  }
+
   // 设置外观：桌面主题模式（light / dark / auto）
   function setTheme(mode: 'light' | 'dark' | 'auto') {
     theme.value = mode
@@ -252,6 +263,7 @@ export const useSettingsStore = defineStore('settings', () => {
     userMessageFontSize,
     assistantMessageFontSize,
     editorFontSize,
+    editorOpacity,
     theme,
     promptModesVersion,
     configsVersion,
@@ -278,6 +290,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setUserMessageFontSize,
     setAssistantMessageFontSize,
     setEditorFontSize,
+    setEditorOpacity,
     setTheme,
     refreshPromptModes,
     refreshConfigs

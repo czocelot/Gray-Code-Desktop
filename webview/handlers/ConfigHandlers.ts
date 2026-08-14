@@ -11,7 +11,6 @@ import type {
   GetModelsRequest,
   RemoveModelRequest,
   SetActiveModelRequest,
-  UpdateModelRequest,
 } from '../../backend/modules/api/models';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -34,15 +33,6 @@ function isModelSelectionRequest(value: unknown): value is RemoveModelRequest | 
   return isRecord(value)
     && typeof value.configId === 'string' && !!value.configId.trim()
     && typeof value.modelId === 'string' && !!value.modelId.trim();
-}
-
-function isUpdateModelRequest(value: unknown): value is UpdateModelRequest {
-  if (!isRecord(value)
-    || typeof value.configId !== 'string' || !value.configId.trim()
-    || typeof value.modelId !== 'string' || !value.modelId.trim()) {
-    return false;
-  }
-  return value.name === undefined || typeof value.name === 'string';
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -206,16 +196,6 @@ export const setActiveModel: MessageHandler = async (data, requestId, ctx) => {
     () => notifyChannelsChanged(ctx, data.configId));
 };
 
-export const updateModel: MessageHandler = async (data, requestId, ctx) => {
-  if (!isUpdateModelRequest(data)) {
-    ctx.sendError(requestId, 'UPDATE_MODEL_ERROR', 'Invalid model data');
-    return;
-  }
-  await handleModelOperation(requestId, ctx, 'UPDATE_MODEL_ERROR', t('webview.errors.updateModelFailed'),
-    () => ctx.modelsHandler.updateModel(data), () => ({ success: true }),
-    () => notifyChannelsChanged(ctx, data.configId));
-};
-
 export function registerConfigHandlers(registry: Map<string, MessageHandler>): void {
   registry.set(MESSAGE_NAMES['config.listConfigs'], listConfigs);
   registry.set(MESSAGE_NAMES['config.getConfig'], getConfig);
@@ -226,5 +206,4 @@ export function registerConfigHandlers(registry: Map<string, MessageHandler>): v
   registry.set(MESSAGE_NAMES['models.addModels'], addModels);
   registry.set(MESSAGE_NAMES['models.removeModel'], removeModel);
   registry.set(MESSAGE_NAMES['models.setActiveModel'], setActiveModel);
-  registry.set(MESSAGE_NAMES['models.updateModel'], updateModel);
 }

@@ -292,8 +292,7 @@ const zhCN = {
                     addModelsFailed: '添加模型失败',
                     removeModelFailed: '移除模型失败',
                     modelNotInList: '模型不在列表中',
-                    setActiveModelFailed: '设置激活模型失败',
-                    updateModelFailed: '更新模型信息失败'
+                    setActiveModelFailed: '设置激活模型失败'
                 }
             },
             mcp: {
@@ -703,6 +702,7 @@ description: "简要描述该技能的功能及使用场景"
             cannotRevealInExplorer: '无法在文件管理器中显示',
             
             deleteMessageFailed: '删除消息失败',
+            updateMessageFailed: '更新消息失败',
             
             interruptMessageInvalidConversation: '无效的会话 ID',
             interruptMessageEmptyText: '消息内容不能为空',

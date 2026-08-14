@@ -460,6 +460,44 @@ export const useChatStore = defineStore('chat', () => {
   
   const editAndRetry = (messageIndex: number, newMessage: string, attachments?: Attachment[], mode?: 'branch' | 'keep') =>
     editAndRetryFn(state, computed, messageIndex, newMessage, attachments, cancelStream, mode)
+
+  /**
+   * 就地改写 AI 消息内容（不重新生成、不截断后续消息）。
+   *
+   * 与 editAndRetry（编辑用户消息后重新生成）不同：仅改写目标 assistant 消息的
+   * 文本（content + parts），保留消息节点、后续消息与分支图；后端经
+   * conversation.updateMessage 落盘持久化。本地先行乐观更新，失败回滚并返回 false。
+   */
+  const updateAssistantMessage = async (messageId: string, newContent: string): Promise<boolean> => {
+    const idx = state.allMessages.value.findIndex((m: Message) => m.id === messageId)
+    if (idx === -1) return false
+    const msg = state.allMessages.value[idx]
+    if (!msg || msg.role !== 'assistant' || typeof msg.backendIndex !== 'number') return false
+    const convId = state.currentConversationId.value
+    if (!convId) return false
+
+    const prevContent = msg.content
+    const prevParts = msg.parts
+    // 乐观更新：本地窗口立即反映编辑结果
+    msg.content = newContent
+    msg.parts = [{ text: newContent }]
+
+    try {
+      await sendToExtension(MESSAGE_NAMES['conversation.updateMessage'], {
+        conversationId: convId,
+        messageIndex: msg.backendIndex,
+        messageId: msg.id,
+        content: newContent
+      })
+      return true
+    } catch (err) {
+      // 回滚本地窗口，保持与后端一致
+      msg.content = prevContent
+      msg.parts = prevParts
+      console.error('更新 AI 消息失败:', err)
+      return false
+    }
+  }
   
   const deleteMessage = (targetIndex: number) => deleteMessageFn(state, targetIndex, cancelStream)
   const deleteSingleMessage = (targetIndex: number) => deleteSingleMessageFn(state, targetIndex, cancelStream)
@@ -1064,6 +1102,7 @@ export const useChatStore = defineStore('chat', () => {
     cancelStream,
     cancelStreamAndRejectTools,
     editAndRetry,
+    updateAssistantMessage,
     deleteMessage,
     deleteSingleMessage,
 

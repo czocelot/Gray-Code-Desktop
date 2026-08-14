@@ -15,9 +15,7 @@ import type {
     RemoveModelRequest,
     RemoveModelResponse,
     SetActiveModelRequest,
-    SetActiveModelResponse,
-    UpdateModelRequest,
-    UpdateModelResponse
+    SetActiveModelResponse
 } from './types';
 
 /**
@@ -165,46 +163,6 @@ export class ModelsHandler {
             return errorResponse(
                 'SET_ACTIVE_MODEL_FAILED',
                 error instanceof Error ? error.message : t('modules.api.models.errors.setActiveModelFailed')
-            );
-        }
-    }
-
-    /**
-     * 更新已有模型的名称/描述等可编辑信息（编辑「AI 信息」）。
-     *
-     * 通过 updateModels 原子合并：基于最新缓存按 id 定位并替换 name/description
-     * （未传的字段保持原值），避免 check-then-write 竞态与整表覆盖。
-     */
-    async updateModel(request: UpdateModelRequest): Promise<UpdateModelResponse> {
-        try {
-            const config = await this.configManager.getConfig(request.configId);
-            if (!config) {
-                return errorResponse('CONFIG_NOT_FOUND', t('modules.api.models.errors.configNotFound'));
-            }
-
-            const models = config.models ?? [];
-            const modelExists = models.some(m => m.id === request.modelId);
-            if (!modelExists) {
-                return errorResponse('MODEL_NOT_IN_LIST', t('modules.api.models.errors.modelNotInList'));
-            }
-
-            await this.configManager.updateModels(request.configId, (current) =>
-                current.map(m => {
-                    if (m.id !== request.modelId) return m;
-                    const next: ModelInfo = { ...m };
-                    if (request.name !== undefined) next.name = request.name;
-                    if (request.description !== undefined) next.description = request.description;
-                    return next;
-                })
-            );
-
-            return {
-                success: true
-            };
-        } catch (error: unknown) {
-            return errorResponse(
-                'UPDATE_MODEL_FAILED',
-                error instanceof Error ? error.message : t('modules.api.models.errors.updateModelFailed')
             );
         }
     }

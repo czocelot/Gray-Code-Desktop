@@ -360,6 +360,15 @@ export interface GlobalSettings {
              * 默认 13。
              */
             editorFontSize?: number;
+
+            /**
+             * 文件编辑界面不透明度（0-100）
+             *
+             * 独立于全局 UI 不透明度（uiOpacity），仅作用于文件编辑标签页（FileEditorPage）
+             * 的半透明背景层。未配置（undefined）时跟随全局 uiOpacity；配置后独立控制。
+             * 默认 undefined（跟随全局）。
+             */
+            editorOpacity?: number;
         };
 
         /**

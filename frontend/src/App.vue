@@ -258,14 +258,20 @@ async function handleCancel() {
 }
 
 // 处理编辑消息 - 使用 allMessages 索引（mode：'branch' 新建分支（默认）；'keep' 原地改写保持当前分支）
+// AI（assistant）消息编辑：仅就地改写文本（不重新生成、不截断后续消息），走 conversation.updateMessage
 async function handleEdit(messageId: string, newContent: string, editAttachments: Attachment[], mode: 'branch' | 'keep' = 'branch') {
   const index = chatStore.allMessages.findIndex((m: Message) => m.id === messageId)
-  if (index !== -1) {
-    try {
-      await chatStore.editAndRetry(index, newContent, editAttachments, mode)
-    } catch (err) {
-      console.error('编辑失败:', err)
+  if (index === -1) return
+  const msg = chatStore.allMessages[index]
+  try {
+    if (msg.role === 'assistant') {
+      const ok = await chatStore.updateAssistantMessage(messageId, newContent)
+      if (!ok) console.error('编辑 AI 消息失败:', messageId)
+      return
     }
+    await chatStore.editAndRetry(index, newContent, editAttachments, mode)
+  } catch (err) {
+    console.error('编辑失败:', err)
   }
 }
 
@@ -551,6 +557,19 @@ watch(
   },
   { immediate: true }
 )
+// 文件编辑界面独立不透明度 → CSS 变量：未配置（null）时移除变量，
+// 由 FileEditorPage 的 var(--gc-editor-opacity, var(--gc-ui-opacity, 1)) 回退链跟随全局 UI 不透明度
+watch(
+  () => settingsStore.editorOpacity,
+  (opacity) => {
+    if (opacity === null) {
+      document.documentElement.style.removeProperty('--gc-editor-opacity')
+      return
+    }
+    document.documentElement.style.setProperty('--gc-editor-opacity', String(normalizeUiOpacity(opacity)))
+  },
+  { immediate: true }
+)
 
 let mediaQueryDispose: (() => void) | null = null
 
@@ -606,6 +625,9 @@ async function loadLanguageSettings() {
       )
       settingsStore.setEditorFontSize(
         typeof appearance.editorFontSize === 'number' ? appearance.editorFontSize : 13
+      )
+      settingsStore.setEditorOpacity(
+        typeof appearance.editorOpacity === 'number' ? appearance.editorOpacity : null
       )
       if (settingsStore.wallpaperPath) {
         loadWallpaperImage(settingsStore.wallpaperPath)

@@ -77,6 +77,28 @@ describe('MessageActions 按钮排列', () => {
     expect(buttons[2].attributes('title')).toBe('重新生成')
   })
 
+  test('AI 消息可编辑：canEdit=true 时编辑按钮出现在最前（编辑/复制/查看回复/重试/删除）', () => {
+    const wrapper = mountActions({
+      message: createMessage('assistant'),
+      canEdit: true,
+      canRetry: true,
+      canViewResponse: true
+    })
+    const buttons = wrapper.findAll('.icon-button')
+    expect(buttons).toHaveLength(5)
+
+    const classes = buttons.map((b) => b.find('i').classes().find((c) => c.startsWith('codicon-')))
+    expect(classes).toEqual([
+      'codicon-edit',
+      'codicon-copy',
+      'codicon-eye',
+      'codicon-refresh',
+      'codicon-trash'
+    ])
+    // 编辑按钮 tooltip 与用户消息一致
+    expect(buttons[0].attributes('title')).toBe('编辑消息')
+  })
+
   test('无分支权限时用户消息为 3 个按钮（编辑 / 复制 / 删除）', () => {
     const wrapper = mountActions({ canEdit: true, canBranch: false })
     expect(wrapper.findAll('.icon-button')).toHaveLength(3)

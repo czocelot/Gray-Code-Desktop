@@ -232,7 +232,9 @@ watch(() => props.filePath, () => {
   inset: 0;
   z-index: -1;
   background: var(--vscode-editor-background, #1e1e1e);
-  opacity: calc(var(--gc-ui-opacity, 1));
+  /* 独立于全局 UI 不透明度：--gc-editor-opacity 优先（文件编辑界面独立滑条）；
+     未配置时回退 --gc-ui-opacity（跟随全局），保持旧行为不变 */
+  opacity: var(--gc-editor-opacity, var(--gc-ui-opacity, 1));
   pointer-events: none;
 }
 

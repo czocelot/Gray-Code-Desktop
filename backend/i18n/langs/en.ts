@@ -291,8 +291,7 @@ const en: BackendLanguageMessages = {
                     addModelsFailed: 'Failed to add models',
                     removeModelFailed: 'Failed to remove model',
                     modelNotInList: 'Model not in list',
-                    setActiveModelFailed: 'Failed to set active model',
-                    updateModelFailed: 'Failed to update model info'
+                    setActiveModelFailed: 'Failed to set active model'
                 }
             },
             mcp: {
@@ -702,6 +701,7 @@ Project-level takes priority. Duplicate skill names only load the highest-priori
             cannotRevealInExplorer: 'Cannot reveal in explorer',
             
             deleteMessageFailed: 'Failed to delete message',
+            updateMessageFailed: 'Failed to update message',
             
             interruptMessageInvalidConversation: 'Invalid conversation ID',
             interruptMessageEmptyText: 'Message text must not be empty',

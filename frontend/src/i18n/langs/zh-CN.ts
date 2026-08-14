@@ -1893,7 +1893,6 @@ const zhCN = {
                 addTooltip: '添加',
                 removeTooltip: '移除',
                 enabledTooltip: '当前启用的模型',
-                editTooltip: '编辑模型信息',
                 filterPlaceholder: '筛选模型...',
                 clearFilter: '清除筛选',
                 noResults: '没有匹配的模型',
@@ -1903,20 +1902,10 @@ const zhCN = {
                     confirm: '清除',
                     cancel: '取消'
                 },
-                editDialog: {
-                    title: '编辑模型信息',
-                    nameLabel: '名称',
-                    namePlaceholder: '显示名称（可选，留空则显示模型 ID）',
-                    descLabel: '描述',
-                    descPlaceholder: '模型描述（可选）',
-                    save: '保存',
-                    cancel: '取消'
-                },
                 errors: {
                     addFailed: sharedZhCN.components.settings.modelManager.errors.addFailed,
                     removeFailed: sharedZhCN.components.settings.modelManager.errors.removeFailed,
                     setActiveFailed: sharedZhCN.components.settings.modelManager.errors.setActiveFailed,
-                    editFailed: sharedZhCN.components.settings.modelManager.errors.editFailed
                 }
             },
             modelSelectionDialog: {
@@ -2947,6 +2936,12 @@ const zhCN = {
                     description: '调节输入框、设置面板、消息区背景等界面面板背景的不透明度，透出窗口背景。',
                     opacity: '不透明度',
                     hint: '100 为完全不透明；数值越低面板背景越透明，文字与图标保持清晰。不影响远控端界面。'
+                },
+                editorOpacity: {
+                    title: '编辑器不透明度',
+                    description: '独立调节文件编辑界面的不透明度，透出桌面背景图/窗口背景。未独立设置时跟随全局 UI 不透明度。',
+                    opacity: '不透明度',
+                    hint: '仅作用于文件编辑标签页；代码文字与界面图标保持不透明。'
                 },
                 userMessageFontSize: {
                     title: '用户消息字号',

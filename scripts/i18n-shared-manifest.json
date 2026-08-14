@@ -47,7 +47,6 @@
     { "frontend": "components.settings.mcpSettings.form.serverIdError", "backend": "modules.mcp.errors.invalidServerId" },
     { "frontend": "components.settings.modelManager.errors.removeFailed", "backend": "modules.api.models.errors.removeModelFailed" },
     { "frontend": "components.settings.modelManager.errors.setActiveFailed", "backend": "modules.api.models.errors.setActiveModelFailed" },
-    { "frontend": "components.settings.modelManager.errors.editFailed", "backend": "modules.api.models.errors.updateModelFailed" },
     { "frontend": "components.settings.checkpoint.sections.cleanup.phaseBefore", "backend": "modules.checkpoint.description.before" },
     { "frontend": "components.settings.checkpoint.sections.cleanup.phaseAfter", "backend": "modules.checkpoint.description.after" },
     { "frontend": "components.settings.toolSettings.files.applyDiff.diffGuardWarning", "backend": "tools.file.diffManager.diffGuardWarning" },

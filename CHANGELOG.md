@@ -24,21 +24,23 @@
 
 ## [1.7.19dev] - 2026-08-14
 
+### Added：文件编辑界面独立不透明度滑条
+  - 设置 → 外观新增「编辑器不透明度」滑块（0-100%）：独立调节文件编辑页（FileEditorPage）半透明背景层，透出桌面背景图/窗口背景；代码文字与界面图标保持不透明。
+  - 未独立设置时跟随全局「UI 不透明度」（CSS 回退链 var(--gc-editor-opacity, var(--gc-ui-opacity, 1))，旧行为不变）；持久化到 ui.appearance.editorOpacity（可 Settings Sync），三语 i18n + 设置搜索锚点收录。
+
+### Added：编辑 AI 消息（像编辑用户消息一样直接修改 AI 回复内容）
+  - 聊天区 AI 消息 hover 操作栏新增「编辑」按钮（非流式状态可用），复用编辑对话框：修改内容后保存即**就地改写**该条回复（不重新生成、不截断后续消息），本地窗口与后端持久化同步；对话框对 AI 消息隐藏检查点回档/分支/附件（仅文本原地改写）。
+  - 后端新增 conversation.updateMessage 协议消息（ConversationManager.updateMessage 原子改写 parts，带 messageId 索引漂移预检）；前端 chatStore.updateAssistantMessage 乐观更新 + 失败回滚；新增 9 例 handler 回归测试。
+
 ### Added：编辑器代码字号调节（文件编辑页 + 代码查看抽屉）
-  - 设置 → 外观新增「编辑器代码字号」滑块（8-32px，默认 13）：作用于文件编辑页（FileEditorPage）与代码查看抽屉（CodeViewPanel）的代码文字，不改变 UI 其它部分字号；经 CSS 变量 --gc-editor-font-size 应用（FileEditorPage 回退链 var(--gc-editor-font-size, var(--vscode-editor-font-size, 13px))，CodeView 原 12px 硬编码改为变量），持久化到 ui.appearance.editorFontSize（可 Settings Sync），三语 i18n + 设置搜索锚点收录。
-
-### Added：代码查看抽屉（CodeView）接入 UI 不透明度（桌面版）
-  - 代码查看面板此前直接使用不透明背景（var(--vscode-editor-background)），不跟随「UI 不透明度」设置；现改用与 FileEditorPage 同款的伪元素方案（background: transparent + ::before + opacity: var(--gc-ui-opacity) 惰性解析），代码查看抽屉内容区随 UI 不透明度实时半透明、透出桌面背景图/窗口背景，文字/图标保持全不透明。
-
-### Added：模型管理器支持编辑模型名称/描述（编辑 AI 信息）
-  - 设置 → 渠道 → 模型管理器此前只能添加/删除/启用模型，无法修改已有模型的 name/description；现每条模型新增「编辑」按钮（hover 浮现），弹窗可编辑显示名称与描述（留空即清除），保存后即时生效并同步刷新输入区/任务卡/工具面板的模型下拉框。
-  - 后端新增 models.updateModel 协议消息与 ModelsHandler.updateModel（经 ConfigManager.updateModels 原子合并按 id 局部替换，未传字段保持原值，模型不存在/配置不存在返回结构化错误）；webview ConfigHandlers 注册 updateModel 并复用渠道变更推送；新增 8 例回归测试（后端 5 + webview 3）覆盖按 id 更新/字段保留/错误路径/推送。
+  - 设置 → 外观新增「编辑器代码字号」滑块（8-32px，默认 13）：作用于文件编辑页（FileEditorPage）与代码查看抽屉（CodeViewPanel）的代码文字，不改变 UI 其它部分字号；经 CSS 变量 --gc-editor-font-size 应用，持久化到 ui.appearance.editorFontSize（可 Settings Sync），三语 i18n + 设置搜索锚点收录。
 
 ### Fixed：更新面板「下载完成」文案 {path} 占位符未替换
   - useUpdateSettings.updateNow 成功文案只替换了 {version}，i18n 文案里的 {path} 原样显示；现补 .replace('{path}', response.localPath)。
 
 ### Fixed：扩展形态（webview/ChatViewProvider、bootstrap）更新检查完成不弹「发现新版本」
   - 扩展形态创建 UpdateChecker 时未传 onStatusChange，而前端弹窗仅挂载时查询一次 status、启动检查延迟 10s 才完成，导致扩展形态自动更新提示永远不会出现；现与桌面端 BackendHost 对齐：检查完成发现新版本时经 sendCommand 推送 update.checkAvailable（桌面端不受影响，链路早已完整）。
+
 
 
 ## [1.7.18dev] - 2026-08-13

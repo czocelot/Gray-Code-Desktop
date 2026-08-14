@@ -3,7 +3,6 @@ import { MESSAGE_NAMES } from '@shared/protocol'
 import { ref, computed } from 'vue'
 import ModelSelectionDialog from './ModelSelectionDialog.vue'
 import ConfirmDialog from '../common/ConfirmDialog.vue'
-import Modal from '../common/Modal.vue'
 import CustomScrollbar from '../common/CustomScrollbar.vue'
 import { sendToExtension } from '@/utils/vscode'
 import { useI18n } from '@/i18n'
@@ -29,13 +28,6 @@ const emit = defineEmits<Emits>()
 const showDialog = ref(false)
 const showClearConfirm = ref(false)
 const newModelId = ref('')
-
-// 编辑对话框状态（编辑模型名称/描述 = 编辑 AI 信息）
-const showEditDialog = ref(false)
-const editingModel = ref<ModelInfo | null>(null)
-const editName = ref('')
-const editDescription = ref('')
-const isSavingEdit = ref(false)
 
 // 筛选关键词
 const filterKeyword = ref('')
@@ -177,45 +169,6 @@ async function confirmClearAllModels() {
   }
 }
 
-// 打开编辑对话框（预填当前名称/描述）
-function openEditDialog(model: ModelInfo) {
-  editingModel.value = model
-  editName.value = model.name ?? ''
-  editDescription.value = model.description ?? ''
-  showEditDialog.value = true
-}
-
-// 保存编辑后的模型信息（models.updateModel）
-async function saveModelEdit() {
-  if (!editingModel.value) return
-  const modelId = editingModel.value.id
-  const trimmedName = editName.value.trim()
-  const trimmedDescription = editDescription.value.trim()
-
-  isSavingEdit.value = true
-  try {
-    await sendToExtension(MESSAGE_NAMES['models.updateModel'], {
-      configId: props.configId,
-      modelId,
-      name: trimmedName,
-      description: trimmedDescription
-    })
-    // 更新本地列表并触发父组件持久化
-    const updatedModels = props.models.map(m =>
-      m.id === modelId
-        ? { ...m, name: trimmedName, description: trimmedDescription }
-        : m
-    )
-    emit('update:models', updatedModels)
-    showEditDialog.value = false
-  } catch (error) {
-    console.error('Failed to update model:', error)
-    alert(t('components.settings.modelManager.errors.editFailed'))
-  } finally {
-    isSavingEdit.value = false
-  }
-}
-
 // 选择模型作为启用
 async function selectModel(modelId: string) {
   try {
@@ -301,13 +254,6 @@ async function selectModel(modelId: string) {
               <span v-if="model.description" class="model-desc">{{ model.description }}</span>
             </div>
             <button
-              class="model-edit-btn"
-              :title="t('components.settings.modelManager.editTooltip')"
-              @click.stop="openEditDialog(model)"
-            >
-              <i class="codicon codicon-edit"></i>
-            </button>
-            <button
               class="model-remove-btn"
               :title="t('components.settings.modelManager.removeTooltip')"
               @click.stop="removeModel(model.id)"
@@ -362,46 +308,6 @@ async function selectModel(modelId: string) {
       :is-danger="true"
       @confirm="confirmClearAllModels"
     />
-
-    <!-- 编辑模型信息对话框（编辑 AI 信息：名称/描述） -->
-    <Modal
-      v-model="showEditDialog"
-      :title="t('components.settings.modelManager.editDialog.title')"
-      width="460px"
-      :mask-closable="!isSavingEdit"
-    >
-      <div class="edit-model-form">
-        <div class="edit-field">
-          <label class="edit-field-label">{{ t('components.settings.modelManager.editDialog.nameLabel') }}</label>
-          <input
-            v-model="editName"
-            type="text"
-            class="edit-field-input"
-            :placeholder="t('components.settings.modelManager.editDialog.namePlaceholder')"
-            :disabled="isSavingEdit"
-          />
-        </div>
-        <div class="edit-field">
-          <label class="edit-field-label">{{ t('components.settings.modelManager.editDialog.descLabel') }}</label>
-          <textarea
-            v-model="editDescription"
-            class="edit-field-input edit-field-textarea"
-            rows="3"
-            :placeholder="t('components.settings.modelManager.editDialog.descPlaceholder')"
-            :disabled="isSavingEdit"
-          ></textarea>
-        </div>
-      </div>
-      <div class="edit-model-actions">
-        <button class="edit-btn secondary" :disabled="isSavingEdit" @click="showEditDialog = false">
-          {{ t('components.settings.modelManager.editDialog.cancel') }}
-        </button>
-        <button class="edit-btn primary" :disabled="isSavingEdit" @click="saveModelEdit">
-          <i v-if="isSavingEdit" class="codicon codicon-loading codicon-modifier-spin"></i>
-          <span v-else>{{ t('components.settings.modelManager.editDialog.save') }}</span>
-        </button>
-      </div>
-    </Modal>
   </div>
 </template>
 
@@ -647,9 +553,7 @@ async function selectModel(modelId: string) {
   overflow-wrap: anywhere;
 }
 
-/* 移除按钮与编辑按钮：hover 时浮现 */
-.model-remove-btn,
-.model-edit-btn {
+.model-remove-btn {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -665,21 +569,12 @@ async function selectModel(modelId: string) {
   opacity: 0;
 }
 
-.model-item:hover .model-remove-btn,
-.model-item:hover .model-edit-btn {
+.model-item:hover .model-remove-btn {
   opacity: 1;
 }
 
 .model-remove-btn:hover {
   color: var(--vscode-errorForeground);
-}
-
-.model-edit-btn:hover {
-  color: var(--vscode-textLink-foreground);
-}
-
-.model-edit-btn .codicon {
-  font-size: 13px;
 }
 
 /* 空状态 */
@@ -753,92 +648,5 @@ async function selectModel(modelId: string) {
 
 .add-btn .codicon {
   font-size: 14px;
-}
-
-/* 编辑模型信息对话框 */
-.edit-model-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 4px 0;
-}
-
-.edit-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.edit-field-label {
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.edit-field-input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 10px;
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border);
-  border-radius: 2px;
-  font-size: 12px;
-  font-family: inherit;
-}
-
-.edit-field-input:focus {
-  outline: none;
-  border-color: var(--vscode-focusBorder);
-}
-
-.edit-field-input::placeholder {
-  color: var(--vscode-input-placeholderForeground);
-}
-
-.edit-field-textarea {
-  resize: vertical;
-  min-height: 60px;
-}
-
-.edit-model-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.edit-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 14px;
-  border: none;
-  border-radius: 2px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.edit-btn.primary {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
-}
-
-.edit-btn.primary:hover:not(:disabled) {
-  background: var(--vscode-button-hoverBackground);
-}
-
-.edit-btn.secondary {
-  background: var(--vscode-button-secondaryBackground);
-  color: var(--vscode-button-secondaryForeground);
-}
-
-.edit-btn.secondary:hover:not(:disabled) {
-  background: var(--vscode-button-secondaryHoverBackground);
-}
-
-.edit-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>

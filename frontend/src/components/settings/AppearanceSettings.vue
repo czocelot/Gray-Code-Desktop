@@ -45,6 +45,8 @@ const themeMode = ref<ThemeMode>('auto')
 
 // 桌面端 UI 不透明度（0-100，默认 100；输入框/设置面板等界面面板）
 const uiOpacity = ref(100)
+// 文件编辑界面独立不透明度（0-100；未配置时显示全局 UI 不透明度，即跟随全局）
+const editorOpacity = ref(100)
 
 // 聊天消息字号（像素，默认 13；仅作用于用户输入消息与 AI 消息，不改变 UI 其它部分字号）
 const userMessageFontSize = ref(13)
@@ -88,6 +90,8 @@ async function loadConfig() {
     wallpaperOpacity.value = typeof appearance?.wallpaperOpacity === 'number' ? appearance.wallpaperOpacity : 30
     themeMode.value = isThemeMode(response?.settings?.ui?.theme) ? response.settings.ui.theme : 'auto'
     uiOpacity.value = typeof appearance?.uiOpacity === 'number' ? appearance.uiOpacity : 100
+    // 文件编辑界面未独立配置时跟随全局 UI 不透明度（滑条显示全局当前值，保存即固化）
+    editorOpacity.value = typeof appearance?.editorOpacity === 'number' ? appearance.editorOpacity : uiOpacity.value
     userMessageFontSize.value = typeof appearance?.userMessageFontSize === 'number' ? appearance.userMessageFontSize : 13
     assistantMessageFontSize.value = typeof appearance?.assistantMessageFontSize === 'number' ? appearance.assistantMessageFontSize : 13
     editorFontSize.value = typeof appearance?.editorFontSize === 'number' ? appearance.editorFontSize : 13
@@ -146,6 +150,7 @@ async function saveConfig() {
           wallpaperPath: wallpaperPath.value,
           wallpaperOpacity: wallpaperOpacity.value,
           uiOpacity: uiOpacity.value,
+          editorOpacity: editorOpacity.value,
           userMessageFontSize: userMessageFontSize.value,
           assistantMessageFontSize: assistantMessageFontSize.value,
           editorFontSize: editorFontSize.value
@@ -161,6 +166,7 @@ async function saveConfig() {
     settingsStore.setSplashEnabled(splashEnabled.value)
     settingsStore.setTheme(themeMode.value)
     settingsStore.setUiOpacity(uiOpacity.value)
+    settingsStore.setEditorOpacity(editorOpacity.value)
     settingsStore.setUserMessageFontSize(userMessageFontSize.value)
     settingsStore.setAssistantMessageFontSize(assistantMessageFontSize.value)
     settingsStore.setEditorFontSize(editorFontSize.value)
@@ -192,6 +198,9 @@ async function resetToDefault() {
   wallpaperOpacity.value = 30
   themeMode.value = 'auto'
   uiOpacity.value = 100
+  // 重置 = 未独立配置（跟随全局 UI 不透明度）
+  editorOpacity.value = 100
+  settingsStore.setEditorOpacity(null)
   userMessageFontSize.value = 13
   assistantMessageFontSize.value = 13
   editorFontSize.value = 13
@@ -436,6 +445,29 @@ onMounted(() => {
           />
         </div>
         <p class="field-hint">{{ t('components.settings.appearanceSettings.uiOpacity.hint') }}</p>
+      </div>
+
+      <div class="form-group" data-search-anchor="editor-opacity">
+        <label class="group-label">
+          <i class="codicon codicon-file-code"></i>
+          {{ t('components.settings.appearanceSettings.editorOpacity.title') }}
+        </label>
+        <p class="field-description">{{ t('components.settings.appearanceSettings.editorOpacity.description') }}</p>
+
+        <div class="opacity-row">
+          <span class="opacity-label">{{ t('components.settings.appearanceSettings.editorOpacity.opacity') }}：{{ editorOpacity }}%</span>
+          <input
+            v-model.number="editorOpacity"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            class="opacity-slider"
+            :disabled="isSaving"
+            @input="settingsStore.setEditorOpacity(editorOpacity)"
+          />
+        </div>
+        <p class="field-hint">{{ t('components.settings.appearanceSettings.editorOpacity.hint') }}</p>
       </div>
 
       <div class="form-group" data-search-anchor="user-message-font-size">

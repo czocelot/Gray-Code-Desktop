@@ -689,6 +689,12 @@ const SEARCH_INDEX: SearchIndexEntry[] = [
     anchor: '[data-search-anchor="ui-opacity"]'
   },
   {
+    key: 'appearance-editor-opacity', tab: 'appearance',
+    labelKey: 'components.settings.appearanceSettings.editorOpacity.title',
+    keywords: ['不透明度', 'opacity', '透明度', '透明', '半透明', '编辑器', '文件', '编辑', 'エディター', '不透明', 'ファイル'],
+    anchor: '[data-search-anchor="editor-opacity"]'
+  },
+  {
     key: 'appearance-user-message-font-size', tab: 'appearance',
     labelKey: 'components.settings.appearanceSettings.userMessageFontSize.title',
     keywords: ['字号', '字体', '大小', 'font', 'size', '文字', '用户消息', '输入', 'フォント', 'サイズ'],

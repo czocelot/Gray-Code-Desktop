@@ -124,6 +124,7 @@ export const MESSAGE_NAMES = {
   'conversation.setWorkspaceUri': 'conversation.setWorkspaceUri',
   'conversation.switchBranchCandidate': 'conversation.switchBranchCandidate',
   'conversation.updateBranchRetentionConfig': 'conversation.updateBranchRetentionConfig',
+  'conversation.updateMessage': 'conversation.updateMessage',
   'conversation.updateSummary': 'conversation.updateSummary',
 
 // ---- 系统提示词 ----
@@ -195,7 +196,6 @@ export const MESSAGE_NAMES = {
   'models.getModels': 'models.getModels',
   'models.removeModel': 'models.removeModel',
   'models.setActiveModel': 'models.setActiveModel',
-  'models.updateModel': 'models.updateModel',
 
 // ---- 通知 ----
   'notifications.agentStop': 'notifications.agentStop',
